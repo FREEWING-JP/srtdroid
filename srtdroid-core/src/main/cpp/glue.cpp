@@ -1210,14 +1210,31 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
     }
 
     // --- Primitive (Integer) クラスのキャッシュ処理 ---
+    // jclass localInteger = env->FindClass("java/lang/Integer");
+    // if (localInteger) {
+    //     // GlobalRefで永続化
+    //     Primitive::cachedIntegerClazz = reinterpret_cast<jclass>(env->NewGlobalRef(localInteger));
+    //     // valueOf 静的メソッドのIDを取得
+    //     Primitive::cachedValueOfMethod = env->GetStaticMethodID(Primitive::cachedIntegerClazz, "valueOf", "(I)Ljava/lang/Integer;");
+    // }
+
+    // 以前リファクタリングした Primitive 側のキャッシュ初期化をここで連動
     jclass localInteger = env->FindClass("java/lang/Integer");
     if (localInteger) {
-        // GlobalRefで永続化
         Primitive::cachedIntegerClazz = reinterpret_cast<jclass>(env->NewGlobalRef(localInteger));
-        // valueOf 静的メソッドのIDを取得
-        Primitive::cachedValueOfMethod = env->GetStaticMethodID(Primitive::cachedIntegerClazz, "valueOf", "(I)Ljava/lang/Integer;");
+        Primitive::cachedIntValueOfMethod = env->GetStaticMethodID(Primitive::cachedIntegerClazz, "valueOf", "(I)Ljava/lang/Integer;");
     }
-
+    jclass localLong = env->FindClass("java/lang/Long");
+    if (localLong) {
+        Primitive::cachedLongClazz = reinterpret_cast<jclass>(env->NewGlobalRef(localLong));
+        Primitive::cachedLongValueOfMethod = env->GetStaticMethodID(Primitive::cachedLongClazz, "valueOf", "(J)Ljava/lang/Long;");
+    }
+    jclass localBoolean = env->FindClass("java/lang/Boolean");
+    if (localBoolean) {
+        Primitive::cachedBooleanClazz = reinterpret_cast<jclass>(env->NewGlobalRef(localBoolean));
+        Primitive::cachedBoolValueOfMethod = env->GetStaticMethodID(Primitive::cachedBooleanClazz, "valueOf", "(Z)Ljava/lang/Boolean;");
+    }
+  
     // --- [新規統合] ArrayList クラスのキャッシュ ---
     jclass localArrayList = env->FindClass("java/util/ArrayList");
     if (localArrayList) {
@@ -1311,9 +1328,20 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
             env->DeleteGlobalRef(Pair::cachedPairClazz);
             Pair::cachedPairClazz = nullptr;
         }
+
         if (Primitive::cachedIntegerClazz) {
             env->DeleteGlobalRef(Primitive::cachedIntegerClazz);
             Primitive::cachedIntegerClazz = nullptr;
+        }
+
+        if (Primitive::cachedLongClazz) {
+            env->DeleteGlobalRef(Primitive::cachedLongClazz);
+            Primitive::cachedLongClazz = nullptr;
+        }
+
+        if (Primitive::cachedBooleanClazz) {
+            env->DeleteGlobalRef(Primitive::cachedBooleanClazz);
+            Primitive::cachedBooleanClazz = nullptr;
         }
         
         // メモリリーク防止のためグローバル参照を解放
