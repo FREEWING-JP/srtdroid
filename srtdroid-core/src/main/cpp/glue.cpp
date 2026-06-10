@@ -36,6 +36,11 @@
 #include "Models/EpollOpts.h"
 #include "Models/EpollEvent.h"
 
+// ----------------------------------------------------------------------------
+// 静的変数の実体定義
+// ----------------------------------------------------------------------------
+jclass Pair::cachedPairClazz = nullptr;
+jmethodID Pair::cachedPairConstructorMethod = nullptr;
 
 int onListenCallback(JNIEnv *env, jobject ju, jclass sockAddrClazz, SRTSOCKET ns, int hs_version,
                      const struct sockaddr *peeraddr, const char *streamid) {
@@ -1003,6 +1008,22 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
         return result;
     }
 
+// ----------------------------------------------------------------------------
+// JNI_OnLoad でアプリ起動時に一発キャッシュ
+// ----------------------------------------------------------------------------
+    // Pairクラスを検索
+    jclass localPair = env->FindClass(PAIR_CLASS);
+    if (localPair) {
+        // NewGlobalRefでクラス参照をJavaのヒープに永続ロック
+        Pair::cachedPairClazz = reinterpret_cast<jclass>(env->NewGlobalRef(localPair));
+        // コンストラクタIDの取得
+        Pair::cachedPairConstructorMethod = env->GetMethodID(Pair::cachedPairClazz, "<init>", "(Ljava/lang/Object;Ljava/lang/Object;)V");
+    }
+
+    if (env->ExceptionCheck()) {
+        return JNI_ERR;
+    }
+  
     if ((registerNativeForClassName(env, SRT_CLASS, srtMethods,
                                     sizeof(srtMethods) / sizeof(srtMethods[0])) != JNI_TRUE)) {
         LOGE("SRT RegisterNatives failed");
@@ -1049,9 +1070,22 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
         LOGE("Epoll RegisterNatives failed");
         return -1;
     }
-
+  
     // Force to load enums when we get the real JNI environment (does not work in callback)
     EnumsSingleton::getInstance(env);
 
     return JNI_VERSION_1_6;
+}
+
+// ----------------------------------------------------------------------------
+// JNI_OnUnload でアプリ終了時にクリーンアップ
+// ----------------------------------------------------------------------------
+JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
+        if (Pair::cachedPairClazz) {
+            env->DeleteGlobalRef(Pair::cachedPairClazz);
+            Pair::cachedPairClazz = nullptr;
+        }
+    }
 }
