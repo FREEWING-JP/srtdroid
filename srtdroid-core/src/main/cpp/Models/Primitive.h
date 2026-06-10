@@ -184,10 +184,5 @@ public:
 
 // 実体定義用スペース（cppファイル側で1度だけ実体化させるための宣言）
 #ifdef INITIALIZE_PRIMITIVE_CACHE
-jclass    Primitive::cachedIntegerClazz = nullptr;
-jmethodID Primitive::cachedIntValueOfMethod = nullptr;
-jclass    Primitive::cachedLongClazz = nullptr;
-jmethodID Primitive::cachedLongValueOfMethod = nullptr;
-jclass    Primitive::cachedBooleanClazz = nullptr;
-jmethodID Primitive::cachedBoolValueOfMethod = nullptr;
+
 #endif
