@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#pragma once
+/*#pragma once
 
 #include "Models.h"
 
@@ -61,4 +61,42 @@ public:
         return env->NewObject(intClazz, integerConstructorMethod, val);
     }
 
+};*/
+
+
+#pragma once
+
+#include "Models.h"
+
+class Primitive {
+public:
+    // キャッシュを保持する静的変数。JNI_OnLoadで初期化されます。
+    static jclass cachedIntegerClazz;
+    static jmethodID cachedValueOfMethod;
+
+    static jobject newJavaInt(JNIEnv *env, jint value) {
+        // 1. キャッシュが存在する場合は、Integer.valueOf(value) を最速ルートで実行
+        if (cachedIntegerClazz && cachedValueOfMethod) {
+            return env->CallStaticObjectMethod(cachedIntegerClazz, cachedValueOfMethod, value);
+        }
+
+        // 2. フォールバック（共存用）：初期化前でも元の挙動ベースで安全に動作
+        jclass integerClazz = env->FindClass("java/lang/Integer");
+        if (!integerClazz) {
+            LOGE("Can't get Integer class");
+            return nullptr;
+        }
+
+        // 互換性とパフォーマンス向上のため、コンストラクタではなく static な valueOf メソッドを取得
+        jmethodID valueOfMethod = env->GetStaticMethodID(integerClazz, "valueOf", "(I)Ljava/lang/Integer;");
+        if (!valueOfMethod) {
+            LOGE("Can't get Integer.valueOf method");
+            env->DeleteLocalRef(integerClazz);
+            return nullptr;
+        }
+
+        jobject integerObj = env->CallStaticObjectMethod(integerClazz, valueOfMethod, value);
+        env->DeleteLocalRef(integerClazz);
+        return integerObj;
+    }
 };
