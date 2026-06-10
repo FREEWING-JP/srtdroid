@@ -508,46 +508,54 @@ nativeSendMsgCtrl(JNIEnv *env,
 
 jobject JNICALL
 nativeRecv(JNIEnv *env, jobject ju, jint len) {
-    // 1. そもそもサイズが不正なら、メモリ確保の手前で即座に返す（完全な無駄の排除）
+    // ------------------------------------------------------------------------
+    // 1. 事前ガード（無駄な処理・配列確保の完全排除）
+    // ------------------------------------------------------------------------
     if (len <= 0) {
         jbyteArray emptyArray = env->NewByteArray(0);
+        // キャッシュ版の Primitive::newJavaInt と Pair::newJavaPair を使用
         return Pair::newJavaPair(env, Primitive::newJavaInt(env, 0), emptyArray);
     }
 
+    // 既存のソケットハンドル取得ロジック（そのまま共存）
     SRTSOCKET u = Socket::getNative(env, ju);
 
-    // 2. 賢いポインタ管理（メモリの二重確保を100%回避する）
-    char* bufPtr = nullptr;
-    std::vector<char> heapBuf; // 16KBを超える場合のみ、ここで初めてメモリ確保が走る
-
-    // 一般的なMTUサイズ（1500〜4000バイト程度）を基準に、
-    // 小さければ「超高速なスタック」、大きければ「安全なヒープ」へ完全に分岐させる
+    // ------------------------------------------------------------------------
+    // 2. メモリ効率の最適化（ハイブリッド・バッファ処理）
+    // ------------------------------------------------------------------------
+    // 一般的なMTUサイズやパケット上限を考慮し、4096バイト以下なら高速なスタック領域、
+    // それ以上なら安全なヒープ領域（std::vector）へ完全にルートを分岐させます。
+    
     if (len <= 4096) {
-        // len が 4096 以下の時だけ、スタック上に「len バイトぴったり」の領域を作る（VLA、またはコンパイラ最適化）
-        // これにより、len が 4096 以上の時はスタック側のメモリ消費は「ゼロ」になります。
+        // --- 【A: 小型パケット・スタックルート】 ---
+        // len バイトぴったりをスタックに確保（二重確保の無駄は1バイトも発生しません）
         char stackBuf[len]; 
-        bufPtr = stackBuf;
-
-        // 【重要】スタックのスコープ内で SRT 受信と Java へのコピーまでを完結させる
-        int res = srt_recv(u, bufPtr, len);
+        
+        // JNIのロックをかけない、安全・高速な状態で SRT からデータを受信
+        int res = srt_recv(u, stackBuf, len);
         jbyteArray byteArray = nullptr;
 
         if (res > 0) {
+            // 実際に受信できたサイズ（res）だけをぴったりJava側に確保
             byteArray = env->NewByteArray(res);
             if (byteArray) {
-                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(bufPtr));
+                // 受信データをJavaの配列にコピー（コピーコストはこれの1回のみ）
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(stackBuf));
             }
         } else {
+            // エラーまたは切断時は空の配列を生成
             byteArray = env->NewByteArray(0);
             res = (res < 0) ? res : 0;
         }
+
+        // キャッシュ対応版の便利関数でラップして即座に返却（リフレクションコストはゼロ）
         return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
 
     } else {
-        // 3. len が 4097 以上の場合の処理
-        // このルートに入った時、上記の `stackBuf` は存在すらしない（メモリ消費ゼロ）ため無駄がありません
-        heapBuf.resize(len);
-        bufPtr = heapBuf.data();
+        // --- 【B: 大型パケット・ヒープルート】 ---
+        // このルートに入った時、上記 A ルートの stackBuf はメモリ上に存在すらしないため、無駄がありません。
+        std::vector<char> heapBuf(len);
+        char* bufPtr = heapBuf.data();
 
         int res = srt_recv(u, bufPtr, len);
         jbyteArray byteArray = nullptr;
@@ -561,6 +569,8 @@ nativeRecv(JNIEnv *env, jobject ju, jint len) {
             byteArray = env->NewByteArray(0);
             res = (res < 0) ? res : 0;
         }
+
+        // キャッシュ対応版の便利関数でラップして返却
         return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
     }
 }
