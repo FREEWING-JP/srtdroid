@@ -1259,6 +1259,13 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
     msgCtrlInorderField   = env->GetFieldID(class_MsgCtrl, "inorder", "Z");
     msgCtrlPktSeqField    = env->GetFieldID(class_MsgCtrl, "pktSeq", "I");
     msgCtrlMsgNumberField = env->GetFieldID(class_MsgCtrl, "msgNumber", "I");
+
+    // 外部からキャッシュに直接アクセスする CallbackContext 用の初期化
+    extern jclass class_InetSocketAddress;
+    jclass localSockAddr = env->FindClass("java/net/InetSocketAddress");
+    if (localSockAddr) {
+        class_InetSocketAddress = reinterpret_cast<jclass>(env->NewGlobalRef(localSockAddr));
+    }
   
     // 例外チェック（万が一クラス名やシグネチャが間違っていた場合の防衛）
     if (env->ExceptionCheck()) {
@@ -1362,5 +1369,10 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
         msgCtrlInorderField   = nullptr;
         msgCtrlPktSeqField    = nullptr;
         msgCtrlMsgNumberField = nullptr;    
+
+        extern jclass class_InetSocketAddress;
+        if (class_InetSocketAddress) { env->DeleteGlobalRef(class_InetSocketAddress);
+            class_InetSocketAddress = nullptr;
+        }
     }
 }
