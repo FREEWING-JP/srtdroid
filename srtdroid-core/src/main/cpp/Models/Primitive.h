@@ -135,14 +135,17 @@ public:
 class Primitive {
 public:
     // glue.cpp 内の JNI_OnLoad で一括マッピングされる最速キャッシュID群
-    static jclass    cachedIntegerClazz;
-    static jmethodID cachedIntValueOfMethod;
+    // ------------------------------------------------------------------------
+    // 【解決策】inline を付与することで、.cpp ファイルを作らずに実体を確定させる
+    // ------------------------------------------------------------------------
+    static inline jclass    cachedIntegerClazz = nullptr;
+    static inline jmethodID cachedIntValueOfMethod = nullptr;
     
-    static jclass    cachedLongClazz;
-    static jmethodID cachedLongValueOfMethod;
+    static inline jclass    cachedLongClazz = nullptr;
+    static inline jmethodID cachedLongValueOfMethod = nullptr;
     
-    static jclass    cachedBooleanClazz;
-    static jmethodID cachedBoolValueOfMethod;
+    static inline jclass    cachedBooleanClazz = nullptr;
+    static inline jmethodID cachedBoolValueOfMethod = nullptr;
 
     static jobject newJavaInt(JNIEnv *env, jint value) {
         if (cachedIntegerClazz && cachedIntValueOfMethod) {
@@ -181,8 +184,3 @@ public:
         return boolObj;
     }
 };
-
-// 実体定義用スペース（cppファイル側で1度だけ実体化させるための宣言）
-#ifdef INITIALIZE_PRIMITIVE_CACHE
-
-#endif
