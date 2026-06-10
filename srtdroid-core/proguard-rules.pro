@@ -19,3 +19,13 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# srtdroid のモデルクラスとそのフィールド名をリネーム（難読化）から保護する
+-keepclassmembers class io.github.thibaultbee.srtdroid.models.MsgCtrl {
+    int flags;
+    int ttl;
+    boolean inorder;
+    int pktSeq;
+    int msgNumber;
+}
+-keep class io.github.thibaultbee.srtdroid.models.MsgCtrl { *; }
