@@ -99,4 +99,32 @@ public:
         env->DeleteLocalRef(integerClazz);
         return integerObj;
     }
+
+    static jobject newJavaLong(JNIEnv *env, int64_t val) {
+        jclass longClazz = env->FindClass(LONG_CLASS);
+        if (!longClazz) {
+            LOGE("Can't find Long class");
+            return nullptr;
+        }
+        jmethodID longConstructorMethod = env->GetMethodID(longClazz, "<init>", "(J)V");
+        if (!longConstructorMethod) {
+            LOGE("Can't find Long constructor");
+            return nullptr;
+        }
+        return env->NewObject(longClazz, longConstructorMethod, val);
+    }
+
+    static jobject newJavaBoolean(JNIEnv *env, bool val) {
+        jclass boolClazz = env->FindClass(BOOLEAN_CLASS);
+        if (!boolClazz) {
+            LOGE("Can't find Boolean class");
+            return nullptr;
+        }
+        jmethodID booleanConstructorMethod = env->GetMethodID(boolClazz, "<init>", "(Z)V");
+        if (!booleanConstructorMethod) {
+            LOGE("Can't find Boolean constructor");
+            return nullptr;
+        }
+        return env->NewObject(boolClazz, booleanConstructorMethod, val);
+    }
 };
