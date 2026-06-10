@@ -37,10 +37,13 @@
 #include "Models/EpollEvent.h"
 
 // ----------------------------------------------------------------------------
-// 静的変数の実体定義
+// 静的変数の実体定義（Pair と Primitive）
 // ----------------------------------------------------------------------------
 jclass Pair::cachedPairClazz = nullptr;
 jmethodID Pair::cachedPairConstructorMethod = nullptr;
+
+jclass Primitive::cachedIntegerClazz = nullptr;
+jmethodID Primitive::cachedValueOfMethod = nullptr;
 
 int onListenCallback(JNIEnv *env, jobject ju, jclass sockAddrClazz, SRTSOCKET ns, int hs_version,
                      const struct sockaddr *peeraddr, const char *streamid) {
@@ -1011,15 +1014,23 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
 // ----------------------------------------------------------------------------
 // JNI_OnLoad でアプリ起動時に一発キャッシュ
 // ----------------------------------------------------------------------------
-    // Pairクラスを検索
+    // --- Pair クラスのキャッシュ処理 ---
     jclass localPair = env->FindClass(PAIR_CLASS);
     if (localPair) {
-        // NewGlobalRefでクラス参照をJavaのヒープに永続ロック
         Pair::cachedPairClazz = reinterpret_cast<jclass>(env->NewGlobalRef(localPair));
-        // コンストラクタIDの取得
         Pair::cachedPairConstructorMethod = env->GetMethodID(Pair::cachedPairClazz, "<init>", "(Ljava/lang/Object;Ljava/lang/Object;)V");
     }
 
+    // --- Primitive (Integer) クラスのキャッシュ処理 ---
+    jclass localInteger = env->FindClass("java/lang/Integer");
+    if (localInteger) {
+        // GlobalRefで永続化
+        Primitive::cachedIntegerClazz = reinterpret_cast<jclass>(env->NewGlobalRef(localInteger));
+        // valueOf 静的メソッドのIDを取得
+        Primitive::cachedValueOfMethod = env->GetStaticMethodID(Primitive::cachedIntegerClazz, "valueOf", "(I)Ljava/lang/Integer;");
+    }
+
+    // 例外チェック（万が一クラス名やシグネチャが間違っていた場合の防衛）
     if (env->ExceptionCheck()) {
         return JNI_ERR;
     }
@@ -1078,7 +1089,7 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
 }
 
 // ----------------------------------------------------------------------------
-// JNI_OnUnload でアプリ終了時にクリーンアップ
+// JNI_OnUnload でアプリ終了時にクリーンアップ（メモリリーク完全防止）
 // ----------------------------------------------------------------------------
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
     JNIEnv* env = nullptr;
@@ -1086,6 +1097,10 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
         if (Pair::cachedPairClazz) {
             env->DeleteGlobalRef(Pair::cachedPairClazz);
             Pair::cachedPairClazz = nullptr;
+        }
+        if (Primitive::cachedIntegerClazz) {
+            env->DeleteGlobalRef(Primitive::cachedIntegerClazz);
+            Primitive::cachedIntegerClazz = nullptr;
         }
     }
 }
