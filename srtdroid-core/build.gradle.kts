@@ -35,14 +35,14 @@ android {
 
             // 不要なコンパイルをスキップするフラグを注入
             // 既存の設定（例: -DANDROID_STL=c++_shared など）の後ろに追加
-            arguments(
+            arguments.addAll(listOf(
                 "-DENABLE_APPS=OFF",          // 1. srt-live-transmit などのPC用アプリをビルドしない（超重要）
                 "-DENABLE_TESTING=OFF",       // 2. テスト用プログラムのビルドをすべてスキップ
                 "-DENABLE_EXAMPLES=OFF",      // 3. SRT公式のC++サンプルプログラムをスキップ
                 "-DENABLE_CODE_COVERAGE=OFF", // 4. コードカバレッジ計測用の無駄なバイナリ埋め込みを排除
                 "-DENABLE_STDCXX_SYNC=ON",    // 5. Android環境に最適なC++11標準同期の有効化
                 "-DCMAKE_BUILD_TYPE=Release"  // 6. デバッグ情報の削除とコンパイラ最適化(-O3)の強制
-            )
+            ))
         }
     }
 
