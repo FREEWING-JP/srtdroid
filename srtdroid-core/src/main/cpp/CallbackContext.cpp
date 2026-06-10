@@ -37,7 +37,7 @@ CallbackContext::~CallbackContext() {
 */
 
 // glue.cppの JNI_OnLoad で初期化・解放が一括管理される共通キャッシュ参照
-jclass class_InetSocketAddress = nullptr;
+// jclass class_InetSocketAddress = nullptr;
 
 CallbackContext::CallbackContext(JNIEnv *env, jobject callingSocket) {
     env->GetJavaVM(&(this->vm));
