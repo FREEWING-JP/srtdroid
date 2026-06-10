@@ -30,7 +30,7 @@
 #include "Models/InetSocketAddress.h"
 #include "Models/OptVal.h"
 #include "Models/MsgCtrl.h"
-#include "Models/Pair.h"
+// #include "Models/Pair.h"
 #include "Models/Stats.h"
 #include "Models/Epoll.h"
 #include "Models/EpollOpts.h"
@@ -39,11 +39,16 @@
 // ----------------------------------------------------------------------------
 // 静的変数の実体定義（Pair と Primitive）
 // ----------------------------------------------------------------------------
+// 外部CallbackContextや他モデルで共用するグローバルクラスキャッシュ
+jclass class_InetSocketAddress = nullptr;
+
+// Primitive.h側のInteger/Long/Booleanキャッシュ実体をここでバインド
+#define INITIALIZE_PRIMITIVE_CACHE
+#include "Models/Pair.h"
+#include "Models/Primitive.h"
+
 jclass Pair::cachedPairClazz = nullptr;
 jmethodID Pair::cachedPairConstructorMethod = nullptr;
-
-jclass Primitive::cachedIntegerClazz = nullptr;
-jmethodID Primitive::cachedValueOfMethod = nullptr;
 
 // ArrayList用のキャッシュ変数をグローバル（または名前空間内）に配置
 jclass    class_ArrayList = nullptr;
@@ -1261,7 +1266,6 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
     msgCtrlMsgNumberField = env->GetFieldID(class_MsgCtrl, "msgNumber", "I");
 
     // 外部からキャッシュに直接アクセスする CallbackContext 用の初期化
-    extern jclass class_InetSocketAddress;
     jclass localSockAddr = env->FindClass("java/net/InetSocketAddress");
     if (localSockAddr) {
         class_InetSocketAddress = reinterpret_cast<jclass>(env->NewGlobalRef(localSockAddr));
@@ -1370,7 +1374,6 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
         msgCtrlPktSeqField    = nullptr;
         msgCtrlMsgNumberField = nullptr;    
 
-        extern jclass class_InetSocketAddress;
         if (class_InetSocketAddress) { env->DeleteGlobalRef(class_InetSocketAddress);
             class_InetSocketAddress = nullptr;
         }
