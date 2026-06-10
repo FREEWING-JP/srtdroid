@@ -50,6 +50,13 @@ jclass class_InetSocketAddress = nullptr;
 jclass Pair::cachedPairClazz = nullptr;
 jmethodID Pair::cachedPairConstructorMethod = nullptr;
 
+jclass    Primitive::cachedIntegerClazz = nullptr;
+jmethodID Primitive::cachedIntValueOfMethod = nullptr;
+jclass    Primitive::cachedLongClazz = nullptr;
+jmethodID Primitive::cachedLongValueOfMethod = nullptr;
+jclass    Primitive::cachedBooleanClazz = nullptr;
+jmethodID Primitive::cachedBoolValueOfMethod = nullptr;
+
 // ArrayList用のキャッシュ変数をグローバル（または名前空間内）に配置
 jclass    class_ArrayList = nullptr;
 jmethodID ctor_ArrayList  = nullptr;
