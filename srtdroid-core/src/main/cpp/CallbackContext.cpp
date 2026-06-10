@@ -39,6 +39,9 @@ CallbackContext::~CallbackContext() {
 // glue.cppの JNI_OnLoad で初期化・解放が一括管理される共通キャッシュ参照
 // jclass class_InetSocketAddress = nullptr;
 
+// リンクエラーを解消するため、正確に extern 宣言（static修飾を外したため安全に結合可能）
+extern jclass class_InetSocketAddress;
+
 CallbackContext::CallbackContext(JNIEnv *env, jobject callingSocket) {
     env->GetJavaVM(&(this->vm));
     this->sockAddrClazz = class_InetSocketAddress; // 起動時確定ポインタを代入してクラスローダー割れを完全防止
