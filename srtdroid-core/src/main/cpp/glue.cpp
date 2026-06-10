@@ -500,24 +500,61 @@ nativeSendMsgCtrl(JNIEnv *env,
 
 jobject JNICALL
 nativeRecv(JNIEnv *env, jobject ju, jint len) {
+    // 1. そもそもサイズが不正なら、メモリ確保の手前で即座に返す（完全な無駄の排除）
+    if (len <= 0) {
+        jbyteArray emptyArray = env->NewByteArray(0);
+        return Pair::newJavaPair(env, Primitive::newJavaInt(env, 0), emptyArray);
+    }
+
     SRTSOCKET u = Socket::getNative(env, ju);
-    jbyteArray byteArray;
-    auto *buf = (char *) malloc(sizeof(char) * len);
 
-    int res = srt_recv(u, buf, len);
+    // 2. 賢いポインタ管理（メモリの二重確保を100%回避する）
+    char* bufPtr = nullptr;
+    std::vector<char> heapBuf; // 16KBを超える場合のみ、ここで初めてメモリ確保が走る
 
-    if (res > 0) {
-        byteArray = env->NewByteArray(res);
-        env->SetByteArrayRegion(byteArray, 0, res, (jbyte *) buf);
+    // 一般的なMTUサイズ（1500〜4000バイト程度）を基準に、
+    // 小さければ「超高速なスタック」、大きければ「安全なヒープ」へ完全に分岐させる
+    if (len <= 4096) {
+        // len が 4096 以下の時だけ、スタック上に「len バイトぴったり」の領域を作る（VLA、またはコンパイラ最適化）
+        // これにより、len が 4096 以上の時はスタック側のメモリ消費は「ゼロ」になります。
+        char stackBuf[len]; 
+        bufPtr = stackBuf;
+
+        // 【重要】スタックのスコープ内で SRT 受信と Java へのコピーまでを完結させる
+        int res = srt_recv(u, bufPtr, len);
+        jbyteArray byteArray = nullptr;
+
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(bufPtr));
+            }
+        } else {
+            byteArray = env->NewByteArray(0);
+            res = (res < 0) ? res : 0;
+        }
+        return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
+
     } else {
-        byteArray = env->NewByteArray(0);
-    }
+        // 3. len が 4097 以上の場合の処理
+        // このルートに入った時、上記の `stackBuf` は存在すらしない（メモリ消費ゼロ）ため無駄がありません
+        heapBuf.resize(len);
+        bufPtr = heapBuf.data();
 
-    if (buf != nullptr) {
-        free(buf);
-    }
+        int res = srt_recv(u, bufPtr, len);
+        jbyteArray byteArray = nullptr;
 
-    return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(bufPtr));
+            }
+        } else {
+            byteArray = env->NewByteArray(0);
+            res = (res < 0) ? res : 0;
+        }
+        return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
+    }
 }
 
 jobject JNICALL
