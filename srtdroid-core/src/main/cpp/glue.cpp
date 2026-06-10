@@ -1227,7 +1227,8 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
     }
 
     // 1. クラスを文字列から検索
-    jclass localMsgCtrl = env->FindClass(MSG_CTRL_CLASS); // または "io/github/thibaultbee/srtdroid/models/MsgCtrl"
+    // jclass localMsgCtrl = env->FindClass(MSG_CTRL_CLASS); // または "io/github/thibaultbee/srtdroid/models/MsgCtrl"
+    jclass localMsgCtrl = env->FindClass("io/github/thibaultbee/srtdroid/models/MsgCtrl");
     if (!localMsgCtrl) {
         return JNI_ERR; // クラスが見つからない場合はロード失敗
     }
