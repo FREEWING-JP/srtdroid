@@ -30,7 +30,7 @@
 #include "Models/InetSocketAddress.h"
 #include "Models/OptVal.h"
 #include "Models/MsgCtrl.h"
-// #include "Models/Pair.h"
+#include "Models/Pair.h"
 #include "Models/Stats.h"
 #include "Models/Epoll.h"
 #include "Models/EpollOpts.h"
@@ -41,11 +41,6 @@
 // ----------------------------------------------------------------------------
 // 外部CallbackContextや他モデルで共用するグローバルクラスキャッシュ
 jclass class_InetSocketAddress = nullptr;
-
-// Primitive.h側のInteger/Long/Booleanキャッシュ実体をここでバインド
-#define INITIALIZE_PRIMITIVE_CACHE
-#include "Models/Pair.h"
-#include "Models/Primitive.h"
 
 jclass Pair::cachedPairClazz = nullptr;
 jmethodID Pair::cachedPairConstructorMethod = nullptr;
