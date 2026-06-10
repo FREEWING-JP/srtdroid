@@ -63,8 +63,7 @@ public:
 
 };*/
 
-
-#pragma once
+/*#pragma once
 
 #include "Models.h"
 
@@ -127,4 +126,68 @@ public:
         }
         return env->NewObject(boolClazz, booleanConstructorMethod, val);
     }
+};*/
+
+#pragma once
+
+#include "Models.h"
+
+class Primitive {
+public:
+    // glue.cpp 内の JNI_OnLoad で一括マッピングされる最速キャッシュID群
+    static jclass    cachedIntegerClazz;
+    static jmethodID cachedIntValueOfMethod;
+    
+    static jclass    cachedLongClazz;
+    static jmethodID cachedLongValueOfMethod;
+    
+    static jclass    cachedBooleanClazz;
+    static jmethodID cachedBoolValueOfMethod;
+
+    static jobject newJavaInt(JNIEnv *env, jint value) {
+        if (cachedIntegerClazz && cachedIntValueOfMethod) {
+            return env->CallStaticObjectMethod(cachedIntegerClazz, cachedIntValueOfMethod, value);
+        }
+        // 予期せぬ未初期化時の安全フォールバック
+        jclass integerClazz = env->FindClass("java/lang/Integer");
+        if (!integerClazz) return nullptr;
+        jmethodID valueOfMethod = env->GetStaticMethodID(integerClazz, "valueOf", "(I)Ljava/lang/Integer;");
+        jobject integerObj = env->CallStaticObjectMethod(integerClazz, valueOfMethod, value);
+        env->DeleteLocalRef(integerClazz);
+        return integerObj;
+    }
+
+    static jobject newJavaLong(JNIEnv *env, int64_t val) {
+        if (cachedLongClazz && cachedLongValueOfMethod) {
+            return env->CallStaticObjectMethod(cachedLongClazz, cachedLongValueOfMethod, static_cast<jlong>(val));
+        }
+        jclass longClazz = env->FindClass("java/lang/Long");
+        if (!longClazz) return nullptr;
+        jmethodID valueOfMethod = env->GetStaticMethodID(longClazz, "valueOf", "(J)Ljava/lang/Long;");
+        jobject longObj = env->CallStaticObjectMethod(longClazz, valueOfMethod, static_cast<jlong>(val));
+        env->DeleteLocalRef(longClazz);
+        return longObj;
+    }
+
+    static jobject newJavaBoolean(JNIEnv *env, bool val) {
+        if (cachedBooleanClazz && cachedBoolValueOfMethod) {
+            return env->CallStaticObjectMethod(cachedBooleanClazz, cachedBoolValueOfMethod, val ? JNI_TRUE : JNI_FALSE);
+        }
+        jclass boolClazz = env->FindClass("java/lang/Boolean");
+        if (!boolClazz) return nullptr;
+        jmethodID valueOfMethod = env->GetStaticMethodID(boolClazz, "valueOf", "(Z)Ljava/lang/Boolean;");
+        jobject boolObj = env->CallStaticObjectMethod(boolClazz, valueOfMethod, val ? JNI_TRUE : JNI_FALSE);
+        env->DeleteLocalRef(boolClazz);
+        return boolObj;
+    }
 };
+
+// 実体定義用スペース（cppファイル側で1度だけ実体化させるための宣言）
+#ifdef INITIALIZE_PRIMITIVE_CACHE
+jclass    Primitive::cachedIntegerClazz = nullptr;
+jmethodID Primitive::cachedIntValueOfMethod = nullptr;
+jclass    Primitive::cachedLongClazz = nullptr;
+jmethodID Primitive::cachedLongValueOfMethod = nullptr;
+jclass    Primitive::cachedBooleanClazz = nullptr;
+jmethodID Primitive::cachedBoolValueOfMethod = nullptr;
+#endif
