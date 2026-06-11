@@ -525,11 +525,14 @@ nativeSendMsgCtrl2(JNIEnv *env,
 // ----------------------------------------------------------------------------
 static jclass    class_MsgCtrl          = nullptr; // クラス参照のみ NewGlobalRef が必要
 
-static jfieldID  msgCtrlFlagsField     = nullptr;
-static jfieldID  msgCtrlTtlField       = nullptr;
-static jfieldID  msgCtrlInorderField   = nullptr;
-static jfieldID  msgCtrlPktSeqField    = nullptr;
-static jfieldID  msgCtrlMsgNumberField = nullptr;
+// 💡 MsgCtrlクラスの各フィールドIDキャッシュ変数の完全版（実体定義）
+jfieldID msgCtrlFlagsField = nullptr;
+jfieldID msgCtrlTtlField = nullptr;
+jfieldID msgCtrlInorderField = nullptr;
+jfieldID msgCtrlBoundaryField = nullptr; // 追加
+jfieldID msgCtrlSrcTimeField = nullptr;   // 追加
+jfieldID msgCtrlPktSeqField = nullptr;
+jfieldID msgCtrlMsgNumberField = nullptr;
 
 jint JNICALL
 nativeSendMsgCtrl(JNIEnv *env,
@@ -1227,6 +1230,8 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
     msgCtrlFlagsField     = env->GetFieldID(class_MsgCtrl, "flags", "I");
     msgCtrlTtlField       = env->GetFieldID(class_MsgCtrl, "ttl", "I");
     msgCtrlInorderField   = env->GetFieldID(class_MsgCtrl, "inorder", "Z");
+        msgCtrlBoundaryField  = env->GetFieldID(class_MsgCtrl, "boundary", "L" BOUNDARY_CLASS ";");
+        msgCtrlSrcTimeField   = env->GetFieldID(class_MsgCtrl, "srcTime", "J");  
     msgCtrlPktSeqField    = env->GetFieldID(class_MsgCtrl, "pktSeq", "I");
     msgCtrlMsgNumberField = env->GetFieldID(class_MsgCtrl, "msgNumber", "I");
 
@@ -1336,6 +1341,8 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
         msgCtrlFlagsField     = nullptr;
         msgCtrlTtlField       = nullptr;
         msgCtrlInorderField   = nullptr;
+    msgCtrlBoundaryField = nullptr;
+    msgCtrlSrcTimeField = nullptr;
         msgCtrlPktSeqField    = nullptr;
         msgCtrlMsgNumberField = nullptr;    
 
