@@ -37,7 +37,7 @@
 #include "Models/EpollEvent.h"
 
 // 💡 パケットおよびメッセージ処理用バッファの統一最大サイズ定数
-#define SRT_MAX_BUFFER_SIZE 4096
+#define SRT_MAX_BUFFER_SIZE 2048
 
 // ----------------------------------------------------------------------------
 // 静的変数の実体定義（Pair と Primitive）
