@@ -23,25 +23,10 @@ extern "C" {
 
 #define  TAG    "srtdroid"
 // Log tools
-#ifdef NDEBUG
-  // リリースビルド（NDEBUG定義時）の処理
-    // デバッグ・情報は完全に無効化（コンパイル時に消滅）
-    #define LOGD(...) ((void)0)
-    #define LOGI(...) ((void)0)
-    
-    // 重大なエラーと警告のみリリース版でも残す（必要に応じて消去も可能）
-    #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
-    #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-
-#else
-  // デバッグビルドの処理
-  #define  LOGE(...)  __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
-  #define  LOGW(...)  __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
-  #define  LOGD(...)  __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
-  #define  LOGI(...)  __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-
-#endif
-
+#define  LOGE(...)  __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define  LOGW(...)  __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+#define  LOGD(...)  __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
+#define  LOGI(...)  __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #ifdef __cplusplus
 }
 #endif
