@@ -157,7 +157,7 @@ void srt_connect_cb(void *opaque, SRTSOCKET ns, int errorcode, const struct sock
     if (getEnvStat == JNI_EDETACHED) {
         // 【最適化】AttachCurrentThreadAsDaemon を使用し、ゾンビプロセス化や終了時フリーズの無駄を完全防止
         // Android NDKの型互換性を保証するため、第一引数は厳密に (void**) でキャストします
-        if (vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
+        if (vm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK) {
             LOGE("Failed to attach current thread as daemon");
             return; // アタッチ失敗時はJavaを呼べないので安全に終了
         }
