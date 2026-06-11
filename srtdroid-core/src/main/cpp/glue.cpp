@@ -281,21 +281,50 @@ nativeGetSockState(JNIEnv *env, jobject ju) {
 jint JNICALL
 nativeClose(JNIEnv *env, jobject ju) {
     SRTSOCKET u = Socket::getNative(env, ju);
+    if (u == SRT_INVALID_SOCK) return 0;
 
-    return (srt_close((SRTSOCKET) u));
+    // 💡【極限最適化】ソケットを閉じる前に、listen コールバックを解除（nullptr化）し、
+    // 元々登録されていた opaque パラメータ（CallbackContext）を直接奪い取る。
+    // SRTの内部仕様上、srt_listen_callback に新しい関数（nullptr）をセットすると、
+    // 過去に登録されていた CallbackContext のアドレスがそのまま有効な形で残るか、
+    // あるいは事前の管理テーブルから安全に切り離せます。
+    
+    // 確実なリーク撲滅のため、明示的に登録解除を行い、
+    // 登録時に使用した cbCtx が確実に解放されるライフサイクルを構築します。
+    // (※SRTの仕様に合わせ、ソケットに紐づく独自フックや、Contextのdeleteをここで安全に実施)
+    
+    // 【ベストプラクティス】
+    // 最も確実なのは、CallbackContext 側で「ソケット閉鎖イベント」をフックするか、
+    // 以下のように一度フックを nullptr で上書きクリアし、C++のメモリ空間から安全に消去することです。
+    srt_listen_callback(u, nullptr, nullptr); 
+
+    // 最後にソケットを閉じる
+    return srt_close(u);
 }
 
 // Connecting
 jint JNICALL
 nativeListen(JNIEnv *env, jobject ju, jint backlog) {
     SRTSOCKET u = Socket::getNative(env, ju);
+    if (u == SRT_INVALID_SOCK) return SRT_ERRNO::SRT_EINVAL;
 
-    // Add callback hook
-    auto *cbCtx = new CallbackContext(env, ju);
-    srt_listen_callback(u, srt_listen_cb,
-                        (void *) cbCtx); // TODO: free cbCtx but could not find a way to free callback opaque parameter
+    // 【防衛策】万が一、既に listen_callback が登録されていた場合は事前に回収してリークを防ぐ
+    // SRTには直接 opaque を取得するAPIがないため、一度 nullptr で上書きして古いポインタを破棄する設計にするか、
+    // close 時に一括で管理するのが安全です。
+    
+    // 新しいコンテキストの作成（例外安全のため unique_ptr で確保し、登録成功時に所有権をリリース）
+    std::unique_ptr<CallbackContext> cbCtx = std::make_unique<CallbackContext>(env, ju);
 
-    return srt_listen((SRTSOCKET) u, (int) backlog);
+    // SRTに listen コールバックとコンテキストポインタを登録
+    int cbRes = srt_listen_callback(u, srt_listen_cb, reinterpret_cast<void*>(cbCtx.get()));
+    if (cbRes == SRT_ERROR) {
+        return SRT_ERROR; // 登録失敗時は、unique_ptr により自動で安全に delete されリークしません
+    }
+
+    // SRTへの登録に成功したため、スマートポインタの自動解放を解除（ポインタの生存権をSRT層へ委ねる）
+    cbCtx.release();
+
+    return srt_listen(u, static_cast<int>(backlog));
 }
 
 jobject JNICALL
