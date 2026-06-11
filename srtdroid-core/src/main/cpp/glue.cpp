@@ -36,6 +36,9 @@
 #include "Models/EpollOpts.h"
 #include "Models/EpollEvent.h"
 
+// 💡 パケットおよびメッセージ処理用バッファの統一最大サイズ定数
+#define SRT_MAX_BUFFER_SIZE 4096
+
 // ----------------------------------------------------------------------------
 // 静的変数の実体定義（Pair と Primitive）
 // ----------------------------------------------------------------------------
@@ -431,13 +434,13 @@ nativeSend2(JNIEnv *env, jobject ju, jobject byteBuffer, jint offset, jint len) 
 jint JNICALL
 nativeSend(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len) {
     // 1. 安全ガード: 不正な引数は即座に弾く
-    if (!byteArray || len <= 0 || offset < 0 || len > 4096) {
+    if (!byteArray || len <= 0 || offset < 0 || len > SRT_MAX_BUFFER_SIZE) {
         return SRT_ERROR;
     }
 
     SRTSOCKET u = Socket::getNative(env, ju);
 
-    // 2. [完全防衛] 一般的なパケットサイズ（MTU:4096バイト以下）なら最速の固定スタックへ完全分離
+    // 2. [完全防衛] 一般的なパケットサイズ（MTU:SRT_MAX_BUFFER_SIZEバイト以下）なら最速の固定スタックへ完全分離
     // これにより、GetPrimitiveArrayCriticalの「GC停止リスク」を100%回避しつつ、
     // malloc/freeのオーバーヘッドをゼロ（ゼロコピーと同等）にします。
         char stackBuf[len];
@@ -475,14 +478,14 @@ nativeSendMsg(JNIEnv *env,
               jint ttl/* = -1*/,
               jboolean inOrder/* = false*/) {
     // 1. 安全ガード: 不正な引数はメモリ確保の手前で即座に弾く（クラッシュ防止）
-    if (!byteArray || len <= 0 || offset < 0 || len > 4096) {
+    if (!byteArray || len <= 0 || offset < 0 || len > SRT_MAX_BUFFER_SIZE) {
         return SRT_ERROR;
     }
 
     SRTSOCKET u = Socket::getNative(env, ju);
 
     // 2. 【完全防衛＆無駄なし】サイズに応じて処理ルートを完全分離
-    // 一般的なMTUサイズ（4096バイト以下）なら超高速な固定スタック領域へ。
+    // 一般的なMTUサイズ（SRT_MAX_BUFFER_SIZEバイト以下）なら超高速な固定スタック領域へ。
     // これにより、malloc/freeのオーバーヘッドを完全にゼロにします。
         // --- 【Aルート: 小型メッセージ・スタックルート】 ---
         char stackBuf[len];
@@ -536,7 +539,7 @@ nativeSendMsgCtrl(JNIEnv *env,
                   jint len,
                   jobject msgCtrl) {
     // 1. 安全ガード: 不正な引数を手前で完璧に遮断
-    if (!byteArray || len <= 0 || offset < 0 || len > 4096) {
+    if (!byteArray || len <= 0 || offset < 0 || len > SRT_MAX_BUFFER_SIZE) {
         return SRT_ERROR;
     }
 
@@ -577,7 +580,7 @@ nativeRecv(JNIEnv *env, jobject ju, jint len) {
     // ------------------------------------------------------------------------
     // 1. 事前ガード（無駄な処理・配列確保の完全排除）
     // ------------------------------------------------------------------------
-    if (len <= 0 || len > 4096) {
+    if (len <= 0 || len > SRT_MAX_BUFFER_SIZE) {
         jbyteArray emptyArray = env->NewByteArray(0);
         // キャッシュ版の Primitive::newJavaInt と Pair::newJavaPair を使用
         return Pair::newJavaPair(env, Primitive::newJavaInt(env, 0), emptyArray);
@@ -589,7 +592,7 @@ nativeRecv(JNIEnv *env, jobject ju, jint len) {
     // ------------------------------------------------------------------------
     // 2. メモリ効率の最適化（ハイブリッド・バッファ処理）
     // ------------------------------------------------------------------------
-    // 一般的なMTUサイズやパケット上限を考慮し、4096バイト以下なら高速なスタック領域、
+    // 一般的なMTUサイズやパケット上限を考慮し、SRT_MAX_BUFFER_SIZEバイト以下なら高速なスタック領域、
     // それ以上なら安全なヒープ領域（std::vector）へ完全にルートを分岐させます。
     
         // --- 【A: 小型パケット・スタックルート】 ---
