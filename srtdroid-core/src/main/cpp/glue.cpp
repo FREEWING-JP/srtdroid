@@ -284,20 +284,38 @@ nativeListen(JNIEnv *env, jobject ju, jint backlog) {
 jobject JNICALL
 nativeAccept(JNIEnv *env, jobject ju) {
     SRTSOCKET u = Socket::getNative(env, ju);
-    struct sockaddr_storage ss = {0};
+    struct sockaddr_storage ss = { 0 };
     int sockaddr_len = sizeof(ss);
-    jobject inetSocketAddress = nullptr;
-
-    SRTSOCKET new_u = srt_accept((SRTSOCKET) u, reinterpret_cast<struct sockaddr *>(&ss),
-                                 &sockaddr_len);
-    if (new_u != -1) {
-        inetSocketAddress = InetSocketAddress::getJava(env, &ss);
+    
+    SRTSOCKET new_u = srt_accept(u, reinterpret_cast<struct sockaddr*>(&ss), &sockaddr_len);
+    
+    // 接続失敗時は、速やかに（Javaオブジェクトを作らずに）エラー結果のPairを返して早期リターン
+    if (new_u == SRT_INVALID_SOCK) {
+        jobject jNullSock = Socket::getJava(env, SRT_INVALID_SOCK);
+        jobject jFailPair = Pair::newJavaPair(env, jNullSock, nullptr);
+        env->DeleteLocalRef(jNullSock);
+        return jFailPair;
     }
 
-    jobject res = Pair::newJavaPair(env, Socket::getJava(env, new_u),
-                                    inetSocketAddress);
+    // 1. 中間に格納する各Javaオブジェクトをローカル参照として正しく取得
+    jobject jNewSocket = Socket::getJava(env, new_u);
+    jobject jInetAddr = InetSocketAddress::getJava(env, &ss);
 
-    return res;
+    // 2. 最終的にJavaへ返却する「Pair」オブジェクトを生成
+    jobject jResultPair = Pair::newJavaPair(env, jNewSocket, jInetAddr);
+
+    // 3. 【完全防衛】Pairに内包させた瞬間に、役目を終えた部品オブジェクトのローカル参照を即時解放
+    // これによりJNIローカル参照テーブルの消費は常にクリーンな状態（実質ゼロ）に保たれます
+    if (jNewSocket) env->DeleteLocalRef(jNewSocket);
+    if (jInetAddr)  env->DeleteLocalRef(jInetAddr);
+
+    // 例外チェック（ProGuard/R8 難読化崩れなどによる不意なクラッシュを防止）
+    if (env->ExceptionCheck()) {
+        if (jResultPair) env->DeleteLocalRef(jResultPair);
+        return nullptr;
+    }
+
+    return jResultPair;
 }
 
 jint JNICALL
