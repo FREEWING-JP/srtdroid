@@ -138,32 +138,49 @@ void onConnectCallback(JNIEnv *env,
     env->DeleteLocalRef(socketClazz);
 }
 
-
-void srt_connect_cb(void *opaque, SRTSOCKET ns, int errorcode, const struct sockaddr *peeraddr,
-                    int token) {
-    auto *cbCtx = static_cast<CallbackContext *>(opaque);
-
-    if (cbCtx == nullptr) {
+void srt_connect_cb(void *opaque, SRTSOCKET ns, int errorcode, const struct sockaddr *peeraddr, int token) {
+    // 1. スマートポインタ（std::unique_ptr）に所有権を即座に委ねる（RAIIパターン）
+    // これにより、この関数がどこで早期リターン（エラー終了）しても、C++のメモリは絶対にリークしません。
+    std::unique_ptr<CallbackContext> cbCtx(static_cast<CallbackContext *>(opaque));
+    
+    if (!cbCtx) {
         LOGE("Failed to get CallbackContext");
         return;
     }
 
     JavaVM *vm = cbCtx->vm;
     JNIEnv *env = nullptr;
-    if (vm->GetEnv((void **) &env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
-            LOGE("Failed to attach current thread");
+    bool shouldDetach = false;
+
+    // 2. 正確なアタッチ状態の判定と処理
+    jint getEnvStat = vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (getEnvStat == JNI_EDETACHED) {
+        // 【最適化】AttachCurrentThreadAsDaemon を使用し、ゾンビプロセス化や終了時フリーズの無駄を完全防止
+        // Android NDKの型互換性を保証するため、第一引数は厳密に (void**) でキャストします
+        if (vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
+            LOGE("Failed to attach current thread as daemon");
+            return; // アタッチ失敗時はJavaを呼べないので安全に終了
         }
-    } else {
-        LOGE("Failed to get env");
+        shouldDetach = true; // このスレッドでアタッチした時のみ、後でデタッチする
+    } else if (getEnvStat != JNI_OK) {
+        LOGE("Failed to get JNIEnv");
+        return;
     }
 
-    onConnectCallback(env, cbCtx, ns, errorcode,
-                      peeraddr, token);
+    // 3. Java側への安全なコールバック呼び出し
+    if (env && cbCtx->callingSocket) {
+        onConnectCallback(env, cbCtx.get(), ns, errorcode, peeraddr, token);
+    }
 
-    vm->DetachCurrentThread();
+    // 4. 【順序の完全修正】
+    // ① まず、JVM（JNIEnv）が生きている「アタッチ状態」のままで、C++の CallbackContext を削除（delete）する
+    //    これによって、デストラクタ内の Java オブジェクトSub参照解放処理（DeleteGlobalRef等）が100%安全に実行されます。
+    cbCtx.reset(); 
 
-    delete cbCtx;
+    // ② すべてのJava関連メモリの整理が『完全に終わった後』で、最後にスレッドをデタッチする
+    if (shouldDetach) {
+        vm->DetachCurrentThread();
+    }
 }
 
 // SRT Logger callback
