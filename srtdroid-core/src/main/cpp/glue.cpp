@@ -287,29 +287,28 @@ nativeAccept(JNIEnv *env, jobject ju) {
     struct sockaddr_storage ss = { 0 };
     int sockaddr_len = sizeof(ss);
     
+    // 1. SRTのacceptを実行（JNIを一切挟まない純粋なC++高速処理）
     SRTSOCKET new_u = srt_accept(u, reinterpret_cast<struct sockaddr*>(&ss), &sockaddr_len);
     
-    // 接続失敗時は、速やかに（Javaオブジェクトを作らずに）エラー結果のPairを返して早期リターン
-    if (new_u == SRT_INVALID_SOCK) {
-        jobject jNullSock = Socket::getJava(env, SRT_INVALID_SOCK);
-        jobject jFailPair = Pair::newJavaPair(env, jNullSock, nullptr);
-        env->DeleteLocalRef(jNullSock);
-        return jFailPair;
+    // 2. 接続失敗（-1 または SRT_INVALID_SOCK）時は、Javaオブジェクトを1つも作らず最速で早期リターン
+    // Pair::newJavaPairに直接nullptrを流し込むことで、JNIのオーバーヘッドを完全にゼロにします
+    if (new_u == -1 || new_u == SRT_INVALID_SOCK) {
+        return Pair::newJavaPair(env, nullptr, nullptr);
     }
 
-    // 1. 中間に格納する各Javaオブジェクトをローカル参照として正しく取得
+    // 3. 成功時のみ、中間に必要なJavaオブジェクトをローカル参照として生成
     jobject jNewSocket = Socket::getJava(env, new_u);
     jobject jInetAddr = InetSocketAddress::getJava(env, &ss);
 
-    // 2. 最終的にJavaへ返却する「Pair」オブジェクトを生成
+    // 4. 最終的にJavaへ返却する「Pair」オブジェクトを生成
     jobject jResultPair = Pair::newJavaPair(env, jNewSocket, jInetAddr);
 
-    // 3. 【完全防衛】Pairに内包させた瞬間に、役目を終えた部品オブジェクトのローカル参照を即時解放
-    // これによりJNIローカル参照テーブルの消費は常にクリーンな状態（実質ゼロ）に保たれます
+    // 5. 【即時クリーンアップ】例外チェックを行う前に、まずは確実にローカル参照を解放
+    // これにより、もしこの後で例外が起きて関数を抜ける場合でも、JNIテーブルは完全に綺麗な状態が保証されます
     if (jNewSocket) env->DeleteLocalRef(jNewSocket);
     if (jInetAddr)  env->DeleteLocalRef(jInetAddr);
 
-    // 例外チェック（ProGuard/R8 難読化崩れなどによる不意なクラッシュを防止）
+    // 6. ProGuard/R8 難読化割れやメモリ不足（OOM）に対する最終防衛線
     if (env->ExceptionCheck()) {
         if (jResultPair) env->DeleteLocalRef(jResultPair);
         return nullptr;
