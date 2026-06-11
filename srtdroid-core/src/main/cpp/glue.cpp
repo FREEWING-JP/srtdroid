@@ -1116,62 +1116,74 @@ nativeEpollWait(JNIEnv *env, jobject epoll, jlong timeOut, jint rnum, jint wnum)
 }
 
 jobject JNICALL
-nativeEpollUWait(JNIEnv *env, jobject epoll, jlong timeOut, jint fdsSize) {
+nativeEpollUWait(JNIEnv *env, jobject epoll, jlong timeOut, jint num) {
     int eid = Epoll::getNative(env, epoll);
+    if (num < 0) num = 0;
 
-    if (fdsSize < 0) fdsSize = 0;
+    const int STACK_LIMIT = 16; // 元のソースのしきい値を維持
+    SRT_EPOLL_EVENT* fdsEventPtr = nullptr;
 
-    // ------------------------------------------------------------------------
-    // 【極限最適化】しきい値を「16」に引き下げ、CPUキャッシュを最速化
-    // ------------------------------------------------------------------------
-    // 実運用で最も高頻度な「同時イベント数16以下」をスタックで超軽量に処理し、
-    // それ以上の大容量要求時はヒープへ逃がすことで、無駄なスタック消費を完全にゼロにします。
-    const int STACK_LIMIT = 16;
+    // Aルート（スタック領域）
+    SRT_EPOLL_EVENT stackFdsEvent[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
+    // Bルート（ヒープ領域）
+    std::vector<SRT_EPOLL_EVENT> heapFdsEvent;
 
-    if (fdsSize <= STACK_LIMIT) {
-        // --- 【Aルート: 通常運用・超軽量スタックルート】 ---
-        // わずか16個分の領域のため、CPUのL1キャッシュに完全に収まり、実行速度がさらに跳ね上がります。
-        SRT_EPOLL_EVENT stackEvents[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
-
-        int res = srt_epoll_uwait(eid, stackEvents, fdsSize, timeOut);
-
-        int validRes = (res > 0) ? res : 0;
-        jobject jEpollEvents = env->NewObject(class_ArrayList, ctor_ArrayList, validRes);
-
-        if (res > 0) {
-            for (int i = 0; i < res; i++) {
-                jobject jEpollEvent = EpollEvent::getJava(env, stackEvents[i]);
-                if (jEpollEvent) {
-                    env->CallBooleanMethod(jEpollEvents, method_ListAdd, jEpollEvent);
-                    env->DeleteLocalRef(jEpollEvent); // JNIテーブル溢れ対策
-                }
-            }
-            if (env->ExceptionCheck()) return nullptr;
-        }
-        return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), jEpollEvents);
-
+    if (num <= STACK_LIMIT) {
+        fdsEventPtr = stackFdsEvent;
     } else {
-        // --- 【Bルート: 大規模監視・ヒープルート】 ---
-        // fdsSizeが17以上の時、上記Aルートの stackEvents はメモリ上に存在すらしないため無駄がありません。
-        std::vector<SRT_EPOLL_EVENT> heapEvents(fdsSize);
+        heapFdsEvent.resize(num);
+        fdsEventPtr = heapFdsEvent.data();
+    }
 
-        int res = srt_epoll_uwait(eid, heapEvents.data(), fdsSize, timeOut);
+    // SRTのエポールユーウェイトを実行
+    int res = srt_epoll_uwait(eid, fdsEventPtr, num, timeOut);
+    int validNum = (res > 0) ? res : 0;
 
-        int validRes = (res > 0) ? res : 0;
-        jobject jEpollEvents = env->NewObject(class_ArrayList, ctor_ArrayList, validRes);
+    // 返却用の ArrayList を生成
+    jobject jEventList = env->NewObject(class_ArrayList, ctor_ArrayList, validNum);
 
-        if (res > 0) {
-            for (int i = 0; i < res; i++) {
-                jobject jEpollEvent = EpollEvent::getJava(env, heapEvents[i]);
-                if (jEpollEvent) {
-                    env->CallBooleanMethod(jEpollEvents, method_ListAdd, jEpollEvent);
-                    env->DeleteLocalRef(jEpollEvent);
+    if (res > 0) {
+        // 同一フレーム内の Socket オブジェクト重複生成を回避するローカルキャッシュ
+        std::unordered_map<SRTSOCKET, jobject> socketCache;
+
+        for (int i = 0; i < validNum; i++) {
+            SRTSOCKET sockId = fdsEventPtr[i].fd;
+            jobject jSocket = nullptr;
+
+            auto it = socketCache.find(sockId);
+            if (it != socketCache.end()) {
+                jSocket = it->second;
+            } else {
+                jSocket = Socket::getJava(env, sockId);
+                if (jSocket) {
+                    socketCache[sockId] = jSocket;
                 }
             }
-            if (env->ExceptionCheck()) return nullptr;
+
+            if (jSocket) {
+                // キャッシュされた安全なjSocketを渡し、EpollEventのJavaオブジェクトを生成
+                // (※EpollEvent::getJavaの内部実装が第3引数にjobjectを取るオーバーロードに対応している場合)
+                jobject jEvent = EpollEvent::getJava(env, fdsEventPtr[i].events, jSocket);
+                if (jEvent) {
+                    env->CallBooleanMethod(jEventList, method_ListAdd, jEvent);
+                    env->DeleteLocalRef(jEvent); // 詰め終えた部品は即時解放
+                }
+            }
         }
-        return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), jEpollEvents);
+
+        // フレーム内キャッシュのソケットを一括クリーンアップ
+        for (auto& pair : socketCache) {
+            env->DeleteLocalRef(pair.second);
+        }
     }
+
+    // ArrayList 自体の参照リークを防ぐ最終ガード
+    if (env->ExceptionCheck()) {
+        if (jEventList) env->DeleteLocalRef(jEventList);
+        return nullptr;
+    }
+
+    return jEventList;
 }
 
 jint JNICALL
