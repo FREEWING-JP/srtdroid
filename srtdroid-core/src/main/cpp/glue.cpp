@@ -635,32 +635,64 @@ nativeRecvA(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len
 }
 
 jobject JNICALL
-nativeRecvMsg2(JNIEnv *env,
-               jobject ju,
-               jint len,
-               jobject msgCtrl) {
+nativeRecvMsg2(JNIEnv *env, jobject ju, jint len, jobject msgCtrl) {
+    // 1. 安全＆サイズガード（巨大バッファ要求時や不正サイズは即座に弾く）
+    if (len <= 0 || len > SRT_MAX_BUFFER_SIZE) {
+        jbyteArray emptyArray = env->NewByteArray(0);
+        return Pair::newJavaPair(env, Primitive::newJavaInt(env, SRT_EINVOP), emptyArray);
+    }
+
     SRTSOCKET u = Socket::getNative(env, ju);
+    
+    // 原作コード通りのCスタイルメモリ確保
     SRT_MSGCTRL *msgctrl = MsgCtrl::getNative(env, msgCtrl);
-    jbyteArray byteArray;
-    auto *buf = (char *) malloc(sizeof(char) * len);
 
-    int res = srt_recvmsg2(u, buf, len, msgctrl);
-
+    // 固定長スタックバッファ運用（受信バッファのmalloc/freeコストは完全ゼロ）
+    char stackBuf[SRT_MAX_BUFFER_SIZE];
+    
+    int res = srt_recvmsg2(u, stackBuf, len, msgctrl);
+    
+    jbyteArray byteArray = nullptr;
     if (res > 0) {
         byteArray = env->NewByteArray(res);
-        env->SetByteArrayRegion(byteArray, 0, res, (jbyte *) buf);
-    } else {
-        byteArray = env->NewByteArray(0);
+        if (byteArray) {
+            env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(stackBuf));
+        }
     }
 
-    if (buf != nullptr) {
-        free(buf);
+    // 受信失敗または例外発生時の安全ガード
+    if (!byteArray) {
+        byteArray = env->NewByteArray(0);
+        if (res < 0) res = -1;
     }
+
+    // 2. SRTから受け取った最新ステータスを Java 側の msgCtrl へ逆流・同期
+    if (msgCtrl && msgctrl != nullptr && res >= 0) {
+        if (msgCtrlFlagsField)     env->SetIntField(msgCtrl, msgCtrlFlagsField, msgctrl->flags);
+        if (msgCtrlTtlField)       env->SetIntField(msgCtrl, msgCtrlTtlField, msgctrl->msgttl);
+        if (msgCtrlInorderField)   env->SetBooleanField(msgCtrl, msgCtrlInorderField, msgctrl->inorder ? JNI_TRUE : JNI_FALSE);
+        if (msgCtrlPktSeqField)    env->SetIntField(msgCtrl, msgCtrlPktSeqField, msgctrl->pktseq);
+        if (msgCtrlMsgNumberField) env->SetIntField(msgCtrl, msgCtrlMsgNumberField, msgctrl->msgno);
+    }
+
+    // 3. 【手動クリーンアップ】RAIIを使わず、関数を抜ける前に確実にfreeを実行
     if (msgctrl != nullptr) {
         free(msgctrl);
     }
 
-    return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
+    // JNIローカル参照リークを防ぐため、プリミティブオブジェクトは一時変数で管理
+    jobject jResInt = Primitive::newJavaInt(env, res);
+    jobject jResultPair = Pair::newJavaPair(env, jResInt, byteArray);
+
+    // 不要になったJNIローカル参照を即時解放し、JNIテーブルのバーストを完全防衛
+    if (jResInt) env->DeleteLocalRef(jResInt);
+
+    if (env->ExceptionCheck()) {
+        if (jResultPair) env->DeleteLocalRef(jResultPair);
+        return nullptr;
+    }
+
+    return jResultPair;
 }
 
 jobject JNICALL
