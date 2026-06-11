@@ -1209,15 +1209,6 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
         Pair::cachedPairConstructorMethod = env->GetMethodID(Pair::cachedPairClazz, "<init>", "(Ljava/lang/Object;Ljava/lang/Object;)V");
     }
 
-    // --- Primitive (Integer) クラスのキャッシュ処理 ---
-    // jclass localInteger = env->FindClass("java/lang/Integer");
-    // if (localInteger) {
-    //     // GlobalRefで永続化
-    //     Primitive::cachedIntegerClazz = reinterpret_cast<jclass>(env->NewGlobalRef(localInteger));
-    //     // valueOf 静的メソッドのIDを取得
-    //     Primitive::cachedValueOfMethod = env->GetStaticMethodID(Primitive::cachedIntegerClazz, "valueOf", "(I)Ljava/lang/Integer;");
-    // }
-
     // 以前リファクタリングした Primitive 側のキャッシュ初期化をここで連動
     jclass localInteger = env->FindClass("java/lang/Integer");
     if (localInteger) {
@@ -1369,7 +1360,8 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
         msgCtrlPktSeqField    = nullptr;
         msgCtrlMsgNumberField = nullptr;    
 
-        if (class_InetSocketAddress) { env->DeleteGlobalRef(class_InetSocketAddress);
+        if (class_InetSocketAddress) {
+            env->DeleteGlobalRef(class_InetSocketAddress);
             class_InetSocketAddress = nullptr;
         }
     }
