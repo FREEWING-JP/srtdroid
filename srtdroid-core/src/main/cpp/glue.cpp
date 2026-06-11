@@ -1015,90 +1015,104 @@ nativeEpollRemoveUSock(JNIEnv *env, jobject epoll, jobject ju) {
     return srt_epoll_remove_usock(eid, u);
 }
 
-// 無駄を完全にゼロにした『真の完璧』コード
 jobject JNICALL
 nativeEpollWait(JNIEnv *env, jobject epoll, jlong timeOut, jint rnum, jint wnum) {
-    // initListCache(env);
-
     int eid = Epoll::getNative(env, epoll);
 
     // 負の値の防衛ガード
     if (rnum < 0) rnum = 0;
     if (wnum < 0) wnum = 0;
 
-    // 分岐のしきい値設定
     const int STACK_LIMIT = 128;
+    SRTSOCKET* readFdsPtr = nullptr;
+    SRTSOCKET* writeFdsPtr = nullptr;
 
-    // ------------------------------------------------------------------------
-    // 【完全無駄なし】サイズに応じて処理ルートをコンパイルレベルで完全分離
-    // ------------------------------------------------------------------------
+    // Aルート用の固定スタック領域
+    SRTSOCKET stackReadFds[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
+    SRTSOCKET stackWriteFds[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
+
+    // Bルート用のヒープ領域
+    std::vector<SRTSOCKET> heapReadFds;
+    std::vector<SRTSOCKET> heapWriteFds;
+
     if (rnum <= STACK_LIMIT && wnum <= STACK_LIMIT) {
-        // --- 【Aルート: 両方とも小さい場合】 ---
-        // 128以下の時だけ、必要最小限の固定長スタックを確保
-        SRTSOCKET stackReadFds[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
-        SRTSOCKET stackWriteFds[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
-
-        int res = srt_epoll_wait(eid, stackReadFds, &rnum, stackWriteFds, &wnum, timeOut, nullptr, 0, nullptr, 0);
-
-        int validRnum = (res > 0 && rnum > 0) ? rnum : 0;
-        int validWnum = (res > 0 && wnum > 0) ? wnum : 0;
-
-        jobject jReadfds = env->NewObject(class_ArrayList, ctor_ArrayList, validRnum);
-        jobject jWritefds = env->NewObject(class_ArrayList, ctor_ArrayList, validWnum);
-
-        if (res > 0) {
-            for (int i = 0; i < validRnum; i++) {
-                jobject jSocket = Socket::getJava(env, stackReadFds[i]);
-                if (jSocket) {
-                    env->CallBooleanMethod(jReadfds, method_ListAdd, jSocket);
-                    env->DeleteLocalRef(jSocket);
-                }
-            }
-            for (int i = 0; i < validWnum; i++) {
-                jobject jSocket = Socket::getJava(env, stackWriteFds[i]);
-                if (jSocket) {
-                    env->CallBooleanMethod(jWritefds, method_ListAdd, jSocket);
-                    env->DeleteLocalRef(jSocket);
-                }
-            }
-            if (env->ExceptionCheck()) return nullptr;
-        }
-        return Pair::newJavaPair(env, jReadfds, jWritefds);
-
+        readFdsPtr = stackReadFds;
+        writeFdsPtr = stackWriteFds;
     } else {
-        // --- 【Bルート: どちらか一方が129以上の場合】 ---
-        // このルートに入った時、上記Aルートの stackReadFds/stackWriteFds は
-        // メモリ上に存在すらしない（確保されない）ため、無駄が1バイトも発生しません。
-        std::vector<SRTSOCKET> heapReadFds(rnum);
-        std::vector<SRTSOCKET> heapWriteFds(wnum);
-
-        int res = srt_epoll_wait(eid, heapReadFds.data(), &rnum, heapWriteFds.data(), &wnum, timeOut, nullptr, 0, nullptr, 0);
-
-        int validRnum = (res > 0 && rnum > 0) ? rnum : 0;
-        int validWnum = (res > 0 && wnum > 0) ? wnum : 0;
-
-        jobject jReadfds = env->NewObject(class_ArrayList, ctor_ArrayList, validRnum);
-        jobject jWritefds = env->NewObject(class_ArrayList, ctor_ArrayList, validWnum);
-
-        if (res > 0) {
-            for (int i = 0; i < validRnum; i++) {
-                jobject jSocket = Socket::getJava(env, heapReadFds[i]);
-                if (jSocket) {
-                    env->CallBooleanMethod(jReadfds, method_ListAdd, jSocket);
-                    env->DeleteLocalRef(jSocket);
-                }
-            }
-            for (int i = 0; i < validWnum; i++) {
-                jobject jSocket = Socket::getJava(env, heapWriteFds[i]);
-                if (jSocket) {
-                    env->CallBooleanMethod(jWritefds, method_ListAdd, jSocket);
-                    env->DeleteLocalRef(jSocket);
-                }
-            }
-            if (env->ExceptionCheck()) return nullptr;
-        }
-        return Pair::newJavaPair(env, jReadfds, jWritefds);
+        heapReadFds.resize(rnum);
+        heapWriteFds.resize(wnum);
+        readFdsPtr = heapReadFds.data();
+        writeFdsPtr = heapWriteFds.data();
     }
+
+    // SRTのepoll_waitを実行（重複をなくすため一本化）
+    int res = srt_epoll_wait(eid, readFdsPtr, &rnum, writeFdsPtr, &wnum, timeOut, nullptr, 0, nullptr, 0);
+
+    int validRnum = (res > 0 && rnum > 0) ? rnum : 0;
+    int validWnum = (res > 0 && wnum > 0) ? wnum : 0;
+
+    jobject jReadfds = env->NewObject(class_ArrayList, ctor_ArrayList, validRnum);
+    jobject jWritefds = env->NewObject(class_ArrayList, ctor_ArrayList, validWnum);
+
+    if (res > 0) {
+        // 💡【劇的最適化：JNIローカルキャッシュ機構】
+        // 検出されたソケットIDに対応するJavaオブジェクトを、この関数実行中だけ使い回すためのマップです。
+        // 同じソケットが何度も検出されたり、Read/Write両方で同時に検出された際、
+        // 2回目以降の Socket::getJava 呼び出し（Javaオブジェクトの新規生成）を100%回避します。
+        std::unordered_map<SRTSOCKET, jobject> socketObjectCache;
+
+        // 共通ヘルパーラムダ関数：キャッシュを利かせて ArrayList に詰め込む（コードの重複も撲滅）
+        auto addSocketsToList = [&](int validCount, SRTSOCKET* fdsPtr, jobject targetList) {
+            for (int i = 0; i < validCount; i++) {
+                SRTSOCKET sockId = fdsPtr[i];
+                jobject jSocket = nullptr;
+
+                auto it = socketObjectCache.find(sockId);
+                if (it != socketObjectCache.end()) {
+                    // キャッシュヒット！ Javaオブジェクトの新規Newを行わず、既存の参照をそのまま再利用
+                    jSocket = it->second;
+                } else {
+                    // キャッシュミス時（そのソケットを今フレーム初めて検出した時）のみ、1度だけ生成
+                    jSocket = Socket::getJava(env, sockId);
+                    if (jSocket) {
+                        socketObjectCache[sockId] = jSocket;
+                    }
+                }
+
+                if (jSocket) {
+                    env->CallBooleanMethod(targetList, method_ListAdd, jSocket);
+                    // ⚠️ ここでは DeleteLocalRef(jSocket) はまだ呼び出しません（キャッシュ内で生かすため）
+                }
+            }
+        };
+
+        // 読み込み・書き込みソケットリストに対してそれぞれ実行
+        addSocketsToList(validRnum, readFdsPtr, jReadfds);
+        addSocketsToList(validWnum, writeFdsPtr, jWritefds);
+
+        // 【一括クリーンアップ】このフレームで生成したすべての一時オブジェクトを、ループ終了後にまとめて安全に解放。
+        for (auto& pair : socketObjectCache) {
+            env->DeleteLocalRef(pair.second);
+        }
+    }
+
+    // 最終的な Pair 組み立てと【ArrayList自体の局所参照リーク防止】
+    jobject jResultPair = nullptr;
+    if (!env->ExceptionCheck()) {
+        jResultPair = Pair::newJavaPair(env, jReadfds, jWritefds);
+    }
+
+    // 【完全防衛】Pairに内包させた直後に、ArrayListの一時ローカル参照を即時解放
+    // これにより、JNIローカル参照テーブルの「目に見えない蓄積リーク」も完全にゼロになります。
+    if (jReadfds)  env->DeleteLocalRef(jReadfds);
+    if (jWritefds) env->DeleteLocalRef(jWritefds);
+
+    if (env->ExceptionCheck()) {
+        if (jResultPair) env->DeleteLocalRef(jResultPair);
+        return nullptr;
+    }
+
+    return jResultPair;
 }
 
 jobject JNICALL
