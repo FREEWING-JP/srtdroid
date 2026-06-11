@@ -230,7 +230,12 @@ nativeCreateSocketFamily(JNIEnv *env, jobject obj,
         return af;
     }
 
-    return srt_socket(af, type, protocol);
+    // return srt_socket(af, type, protocol);
+
+    // 💡 現代のSRTライブラリが推奨する最新のソケット生成APIへ移行
+    // srt_create_socket() は内部でデフォルトのIPv6/IPv4対応ソケットを自動構成するため、
+    // 引数 af, type, protocol を渡す必要がなくなり、非推奨の警告も100%消失します。
+    return srt_create_socket();
 }
 
 static jint JNICALL
