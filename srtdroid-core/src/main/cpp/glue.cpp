@@ -537,49 +537,81 @@ nativeSendMsg2(JNIEnv *env,
     return res;
 }
 
-jint JNICALL
-nativeSendMsg(JNIEnv *env,
-              jobject ju,
-              jbyteArray byteArray,
-              jint offset,
-              jint len,
-              jint ttl/* = -1*/,
-              jboolean inOrder/* = false*/) {
-    // 1. 安全ガード: 不正な引数はメモリ確保の手前で即座に弾く（クラッシュ防止）
-    if (!byteArray || len <= 0 || offset < 0) {
-        return SRT_ERROR;
+jobject JNICALL
+nativeRecvMsg2(JNIEnv *env, jobject ju, jint len, jobject msgCtrl) {
+    // 1. 事前ガード：無駄な処理・配列確保を完璧に排除
+    if (len <= 0) {
+        jbyteArray emptyArray = env->NewByteArray(0);
+        return Pair::newJavaPair(env, Primitive::newJavaInt(env, 0), emptyArray);
     }
 
     SRTSOCKET u = Socket::getNative(env, ju);
+    
+    // 例外安全かつクリーンに自動解放されるスマートポインタ（RAII）
+    std::unique_ptr<SRT_MSGCTRL, void(*)(void*)> msgctrlPtr(
+        MsgCtrl::getNative(env, msgCtrl),
+        [](void* p) { if (p) ::free(p); }
+    );
 
-    // 2. 【完全防衛＆無駄なし】サイズに応じて処理ルートを完全分離
-    // 一般的なMTUサイズ（4096バイト以下）なら超高速な固定スタック領域へ。
-    // これにより、malloc/freeのオーバーヘッドを完全にゼロにします。
+    int res = -1;
+    jbyteArray byteArray = nullptr;
+
+    // 2. ハイブリッド・バッファ処理：MTUバッファ（4KB以下）は最速のスタック領域でmallocをゼロ化
     if (len <= 4096) {
-        // --- 【Aルート: 小型メッセージ・スタックルート】 ---
         std::array<char, 4096> stackBuf;
+        res = srt_recvmsg2(u, stackBuf.data(), len, msgctrlPtr.get());
         
-        // Java配列からC++スタックへ直接データを引き出す（コピーはこれの1回のみ）
-        env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(stackBuf));
-        
-        // JNI呼び出しの直後に厳格な例外チェック
-        if (env->ExceptionCheck()) return SRT_ERROR;
-
-        // ネットワークが詰まってここでブロッキングが発生しても、JVM全体のGCは止まらないため安全です
-        return srt_sendmsg(u, stackBuf, len, static_cast<int>(ttl), inOrder ? 1 : 0);
-
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(stackBuf.data()));
+            }
+        }
     } else {
-        // --- 【Bルート: 大型メッセージ・ヒープルート】 ---
-        // このルートに入った時、上記Aルートの stackBuf はスタック上に1バイトも確保されません。
+        // 4097バイト以上の巨大データ要求時のみ、安全にヒープ（std::vector）へルート変更
         std::vector<char> heapBuf(len);
+        res = srt_recvmsg2(u, heapBuf.data(), len, msgctrlPtr.get());
         
-        // Java配列からC++ヒープへ直接引き出し
-        env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(heapBuf.data()));
-        
-        if (env->ExceptionCheck()) return SRT_ERROR;
-
-        return srt_sendmsg(u, heapBuf.data(), len, static_cast<int>(ttl), inOrder ? 1 : 0);
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(heapBuf.data()));
+            }
+        }
     }
+
+    // 3. エラーまたは受信失敗時の安全処理
+    if (!byteArray) {
+        byteArray = env->NewByteArray(0);
+        if (res < 0) res = -1;
+    }
+
+    // 4. 【重要：ステータスの逆流（Java側への同期）】
+    // srt_recvmsg2 が正常にデータを取得できた場合（res >= 0）のみ、
+    // C++側で更新された最新の制御メタデータをJavaの msgCtrl へ確実に書き戻します。
+    if (msgCtrl && msgctrlPtr && res >= 0) {
+        // glue.cpp 内で事前に静的キャッシュされているフィールドID（難読化対策済み）を使用
+        if (msgCtrlFlagsField)     env->SetIntField(msgCtrl, msgCtrlFlagsField, msgctrlPtr->flags);
+        if (msgCtrlTtlField)       env->SetIntField(msgCtrl, msgCtrlTtlField, msgctrlPtr->msgttl);
+        if (msgCtrlInorderField)   env->SetBooleanField(msgCtrl, msgCtrlInorderField, msgctrlPtr->inorder ? JNI_TRUE : JNI_FALSE);
+        if (msgCtrlPktSeqField)    env->SetIntField(msgCtrl, msgCtrlPktSeqField, msgctrlPtr->pktseq);
+        if (msgCtrlMsgNumberField) env->SetIntField(msgCtrl, msgCtrlMsgNumberField, msgctrlPtr->msgno);
+    }
+
+    // JNIの局所参照リークを防ぐため、プリミティブオブジェクトは一時変数で管理
+    jobject jResInt = Primitive::newJavaInt(env, res);
+    jobject jResultPair = Pair::newJavaPair(env, jResInt, byteArray);
+
+    // 不要になったJNIローカル参照を即時解放し、JNI参照テーブルのバーストを完全防御
+    env->DeleteLocalRef(jResInt);
+
+    // 5. 難読化割れやメモリ不足（OOM）の最終防衛線
+    if (env->ExceptionCheck()) {
+        if (jResultPair) env->DeleteLocalRef(jResultPair);
+        return nullptr;
+    }
+
+    return jResultPair;
 }
 
 jint JNICALL
