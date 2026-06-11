@@ -426,7 +426,7 @@ nativeSend2(JNIEnv *env, jobject ju, jobject byteBuffer, jint offset, jint len) 
 jint JNICALL
 nativeSend(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len) {
     // 1. 安全ガード: 不正な引数は即座に弾く
-    if (!byteArray || len <= 0 || offset < 0) {
+    if (!byteArray || len <= 0 || offset < 0 || len > 4096) {
         return SRT_ERROR;
     }
 
@@ -435,7 +435,6 @@ nativeSend(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len)
     // 2. [完全防衛] 一般的なパケットサイズ（MTU:4096バイト以下）なら最速の固定スタックへ完全分離
     // これにより、GetPrimitiveArrayCriticalの「GC停止リスク」を100%回避しつつ、
     // malloc/freeのオーバーヘッドをゼロ（ゼロコピーと同等）にします。
-    if (len <= 4096) {
         std::array<char, 4096> stackBuf;
         
         // Java配列からスタックへ直接コピー（これ以降、JVMに一切迷惑をかけない独立状態になります）
@@ -444,18 +443,6 @@ nativeSend(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len)
 
         // ネットワークが詰まってここで数秒ブロックしても、JVMのGCは止まらないためアプリは平気です！
         return srt_send(u, stackBuf, len);
-
-    } else {
-        // 3. 4097バイトを超える巨大データ送信の場合
-        // スタック突き破り（オーバーフロー）を防ぐため、安全にヒープ（std::vector）へルート変更。
-        // ここでもAルートのスタックメモリは1バイトも浪費されません。
-        std::vector<char> heapBuf(len);
-        
-        env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(heapBuf.data()));
-        if (env->ExceptionCheck()) return SRT_ERROR;
-
-        return srt_send(u, heapBuf.data(), len);
-    }
 }
 
 jint JNICALL
@@ -483,7 +470,7 @@ nativeSendMsg(JNIEnv *env,
               jint ttl/* = -1*/,
               jboolean inOrder/* = false*/) {
     // 1. 安全ガード: 不正な引数はメモリ確保の手前で即座に弾く（クラッシュ防止）
-    if (!byteArray || len <= 0 || offset < 0) {
+    if (!byteArray || len <= 0 || offset < 0 || len > 4096) {
         return SRT_ERROR;
     }
 
@@ -492,7 +479,6 @@ nativeSendMsg(JNIEnv *env,
     // 2. 【完全防衛＆無駄なし】サイズに応じて処理ルートを完全分離
     // 一般的なMTUサイズ（4096バイト以下）なら超高速な固定スタック領域へ。
     // これにより、malloc/freeのオーバーヘッドを完全にゼロにします。
-    if (len <= 4096) {
         // --- 【Aルート: 小型メッセージ・スタックルート】 ---
         std::array<char, 4096> stackBuf;
         
@@ -504,19 +490,6 @@ nativeSendMsg(JNIEnv *env,
 
         // ネットワークが詰まってここでブロッキングが発生しても、JVM全体のGCは止まらないため安全です
         return srt_sendmsg(u, stackBuf, len, static_cast<int>(ttl), inOrder ? 1 : 0);
-
-    } else {
-        // --- 【Bルート: 大型メッセージ・ヒープルート】 ---
-        // このルートに入った時、上記Aルートの stackBuf はスタック上に1バイトも確保されません。
-        std::vector<char> heapBuf(len);
-        
-        // Java配列からC++ヒープへ直接引き出し
-        env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(heapBuf.data()));
-        
-        if (env->ExceptionCheck()) return SRT_ERROR;
-
-        return srt_sendmsg(u, heapBuf.data(), len, static_cast<int>(ttl), inOrder ? 1 : 0);
-    }
 }
 
 jint JNICALL
@@ -558,7 +531,7 @@ nativeSendMsgCtrl(JNIEnv *env,
                   jint len,
                   jobject msgCtrl) {
     // 1. 安全ガード: 不正な引数を手前で完璧に遮断
-    if (!byteArray || len <= 0 || offset < 0) {
+    if (!byteArray || len <= 0 || offset < 0 || len > 4096) {
         return SRT_ERROR;
     }
 
@@ -585,7 +558,6 @@ nativeSendMsgCtrl(JNIEnv *env,
     }
 
     // 4. 【完全防衛】サイズに応じた処理ルートの完全分離（JVMフリーズ防止＆実質ゼロコピー）
-    if (len <= 4096) {
         std::array<char, 4096> stackBuf;
         
         env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(stackBuf));
@@ -593,15 +565,6 @@ nativeSendMsgCtrl(JNIEnv *env,
 
         // ネットワークが詰まってここで数秒間ブロックしても、JVMのGCは停止しないため100%安全
         return srt_sendmsg2(u, stackBuf, len, msgctrlPtr);
-
-    } else {
-        std::vector<char> heapBuf(len);
-        
-        env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(heapBuf.data()));
-        if (env->ExceptionCheck()) return SRT_ERROR;
-
-        return srt_sendmsg2(u, heapBuf.data(), len, msgctrlPtr);
-    }
 }
 
 jobject JNICALL
@@ -609,7 +572,7 @@ nativeRecv(JNIEnv *env, jobject ju, jint len) {
     // ------------------------------------------------------------------------
     // 1. 事前ガード（無駄な処理・配列確保の完全排除）
     // ------------------------------------------------------------------------
-    if (len <= 0) {
+    if (len <= 0 || len > 4096) {
         jbyteArray emptyArray = env->NewByteArray(0);
         // キャッシュ版の Primitive::newJavaInt と Pair::newJavaPair を使用
         return Pair::newJavaPair(env, Primitive::newJavaInt(env, 0), emptyArray);
@@ -624,7 +587,6 @@ nativeRecv(JNIEnv *env, jobject ju, jint len) {
     // 一般的なMTUサイズやパケット上限を考慮し、4096バイト以下なら高速なスタック領域、
     // それ以上なら安全なヒープ領域（std::vector）へ完全にルートを分岐させます。
     
-    if (len <= 4096) {
         // --- 【A: 小型パケット・スタックルート】 ---
         // len バイトぴったりをスタックに確保（二重確保の無駄は1バイトも発生しません）
         std::array<char, 4096> stackBuf; 
@@ -648,29 +610,6 @@ nativeRecv(JNIEnv *env, jobject ju, jint len) {
 
         // キャッシュ対応版の便利関数でラップして即座に返却（リフレクションコストはゼロ）
         return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
-
-    } else {
-        // --- 【B: 大型パケット・ヒープルート】 ---
-        // このルートに入った時、上記 A ルートの stackBuf はメモリ上に存在すらしないため、無駄がありません。
-        std::vector<char> heapBuf(len);
-        char* bufPtr = heapBuf.data();
-
-        int res = srt_recv(u, bufPtr, len);
-        jbyteArray byteArray = nullptr;
-
-        if (res > 0) {
-            byteArray = env->NewByteArray(res);
-            if (byteArray) {
-                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(bufPtr));
-            }
-        } else {
-            byteArray = env->NewByteArray(0);
-            res = (res < 0) ? res : 0;
-        }
-
-        // キャッシュ対応版の便利関数でラップして返却
-        return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
-    }
 }
 
 jobject JNICALL
