@@ -13,35 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/*#pragma once
-
-#include "Models.h"
-
-class Pair {
-public:
-    static jobject newJavaPair(JNIEnv *env, jobject first, jobject second) {
-        jclass pairClazz = env->FindClass(PAIR_CLASS);
-        if (!pairClazz) {
-            LOGE("Can't get Pair class");
-            return nullptr;
-        }
-
-        jmethodID pairConstructorMethod = env->GetMethodID(pairClazz, "<init>",
-                                                           "(Ljava/lang/Object;Ljava/lang/Object;)V");
-        if (!pairConstructorMethod) {
-            LOGE("Can't get Pair constructor");
-            env->DeleteLocalRef(pairClazz);
-            return nullptr;
-        }
-
-        jobject pair = env->NewObject(pairClazz, pairConstructorMethod, first, second);
-
-        env->DeleteLocalRef(pairClazz);
-
-        return pair;
-    }
-};*/
-
 #pragma once
 
 #include "Models.h"

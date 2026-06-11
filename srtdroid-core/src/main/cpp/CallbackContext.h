@@ -31,11 +31,6 @@ public:
      * @return a CallbackContext structure
      */
     CallbackContext(JNIEnv *env, jobject callingSocket);
-    
-    // ------------------------------------------------------------------------
-    // 【最重要の追記】コンパイルエラーを粉砕するための明示的リリース関数の宣言
-    // ------------------------------------------------------------------------
-    void release(JNIEnv *env);
 
     ~CallbackContext();
 };
