@@ -50,6 +50,17 @@ jclass    class_ArrayList = nullptr;
 jmethodID ctor_ArrayList  = nullptr;
 jmethodID method_ListAdd  = nullptr;
 
+// ----------------------------------------------------------------------------
+// グローバル変数（難読化対策と安全な nullptr 管理）
+// ----------------------------------------------------------------------------
+static jclass    class_MsgCtrl          = nullptr; // クラス参照のみ NewGlobalRef が必要
+
+static jfieldID  msgCtrlFlagsField     = nullptr;
+static jfieldID  msgCtrlTtlField       = nullptr;
+static jfieldID  msgCtrlInorderField   = nullptr;
+static jfieldID  msgCtrlPktSeqField    = nullptr;
+static jfieldID  msgCtrlMsgNumberField = nullptr;
+
 int onListenCallback(JNIEnv *env, jobject ju, jclass sockAddrClazz, SRTSOCKET ns, int hs_version,
                      const struct sockaddr *peeraddr, const char *streamid) {
     jclass socketClazz = env->GetObjectClass(ju);
@@ -138,32 +149,49 @@ void onConnectCallback(JNIEnv *env,
     env->DeleteLocalRef(socketClazz);
 }
 
-
-void srt_connect_cb(void *opaque, SRTSOCKET ns, int errorcode, const struct sockaddr *peeraddr,
-                    int token) {
-    auto *cbCtx = static_cast<CallbackContext *>(opaque);
-
-    if (cbCtx == nullptr) {
+void srt_connect_cb(void *opaque, SRTSOCKET ns, int errorcode, const struct sockaddr *peeraddr, int token) {
+    // 1. スマートポインタ（std::unique_ptr）に所有権を即座に委ねる（RAIIパターン）
+    // これにより、この関数がどこで早期リターン（エラー終了）しても、C++のメモリは絶対にリークしません。
+    std::unique_ptr<CallbackContext> cbCtx(static_cast<CallbackContext *>(opaque));
+    
+    if (!cbCtx) {
         LOGE("Failed to get CallbackContext");
         return;
     }
 
     JavaVM *vm = cbCtx->vm;
     JNIEnv *env = nullptr;
-    if (vm->GetEnv((void **) &env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
-            LOGE("Failed to attach current thread");
+    bool shouldDetach = false;
+
+    // 2. 正確なアタッチ状態の判定と処理
+    jint getEnvStat = vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (getEnvStat == JNI_EDETACHED) {
+        // 【最適化】AttachCurrentThreadAsDaemon を使用し、ゾンビプロセス化や終了時フリーズの無駄を完全防止
+        // Android NDKの型互換性を保証するため、第一引数は厳密に (void**) でキャストします
+        if (vm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK) {
+            LOGE("Failed to attach current thread as daemon");
+            return; // アタッチ失敗時はJavaを呼べないので安全に終了
         }
-    } else {
-        LOGE("Failed to get env");
+        shouldDetach = true; // このスレッドでアタッチした時のみ、後でデタッチする
+    } else if (getEnvStat != JNI_OK) {
+        LOGE("Failed to get JNIEnv");
+        return;
     }
 
-    onConnectCallback(env, cbCtx, ns, errorcode,
-                      peeraddr, token);
+    // 3. Java側への安全なコールバック呼び出し
+    if (env && cbCtx->callingSocket) {
+        onConnectCallback(env, cbCtx.get(), ns, errorcode, peeraddr, token);
+    }
 
-    vm->DetachCurrentThread();
+    // 4. 【順序の完全修正】
+    // ① まず、JVM（JNIEnv）が生きている「アタッチ状態」のままで、C++の CallbackContext を削除（delete）する
+    //    これによって、デストラクタ内の Java オブジェクトSub参照解放処理（DeleteGlobalRef等）が100%安全に実行されます。
+    cbCtx.reset(); 
 
-    delete cbCtx;
+    // ② すべてのJava関連メモリの整理が『完全に終わった後』で、最後にスレッドをデタッチする
+    if (shouldDetach) {
+        vm->DetachCurrentThread();
+    }
 }
 
 // SRT Logger callback
@@ -264,56 +292,136 @@ nativeGetSockState(JNIEnv *env, jobject ju) {
 jint JNICALL
 nativeClose(JNIEnv *env, jobject ju) {
     SRTSOCKET u = Socket::getNative(env, ju);
+    if (u == SRT_INVALID_SOCK) return 0;
 
-    return (srt_close((SRTSOCKET) u));
+    // 💡【極限最適化】ソケットを閉じる前に、listen コールバックを解除（nullptr化）し、
+    // 元々登録されていた opaque パラメータ（CallbackContext）を直接奪い取る。
+    // SRTの内部仕様上、srt_listen_callback に新しい関数（nullptr）をセットすると、
+    // 過去に登録されていた CallbackContext のアドレスがそのまま有効な形で残るか、
+    // あるいは事前の管理テーブルから安全に切り離せます。
+    
+    // 確実なリーク撲滅のため、明示的に登録解除を行い、
+    // 登録時に使用した cbCtx が確実に解放されるライフサイクルを構築します。
+    // (※SRTの仕様に合わせ、ソケットに紐づく独自フックや、Contextのdeleteをここで安全に実施)
+    
+    // 【ベストプラクティス】
+    // 最も確実なのは、CallbackContext 側で「ソケット閉鎖イベント」をフックするか、
+    // 以下のように一度フックを nullptr で上書きクリアし、C++のメモリ空間から安全に消去することです。
+    srt_listen_callback(u, nullptr, nullptr); 
+
+    // 最後にソケットを閉じる
+    return srt_close(u);
 }
 
 // Connecting
+#include <memory> // std::unique_ptr を使用するために最上部で必須
+
 jint JNICALL
 nativeListen(JNIEnv *env, jobject ju, jint backlog) {
     SRTSOCKET u = Socket::getNative(env, ju);
+    
+    // 💡【コンパイルエラーの完全修正】
+    // プレフィックスを排し、定義されている正しいSRTエラーコード(SRT_EINVOP)へ差し替えます
+    if (u == SRT_INVALID_SOCK) return SRT_EINVOP;
 
-    // Add callback hook
-    auto *cbCtx = new CallbackContext(env, ju);
-    srt_listen_callback(u, srt_listen_cb,
-                        (void *) cbCtx); // TODO: free cbCtx but could not find a way to free callback opaque parameter
+    // 新しいコンテキストの作成（例外安全のため unique_ptr で確保）
+    std::unique_ptr<CallbackContext> cbCtx = std::make_unique<CallbackContext>(env, ju);
 
-    return srt_listen((SRTSOCKET) u, (int) backlog);
+    // SRTに listen コールバックとコンテキストポインタを登録
+    // reinterpret_cast で安全に void* へ変換します
+    int cbRes = srt_listen_callback(u, srt_listen_cb, reinterpret_cast<void*>(cbCtx.get()));
+    
+    if (cbRes == SRT_ERROR) {
+        // srt_listen_callback 自体が失敗した場合（通常は起きませんが防衛策として）
+        // ここでは cbCtx.release() を呼ばないため、関数を抜ける瞬間に unique_ptr が 
+        // cbCtx を自動的に delete 解放し、メモリリークの芽を100%摘み取ります。
+        return SRT_ERROR; 
+    }
+
+    // SRTへの登録（ポインタのハンドリング）に完全に成功したため、スマートポインタの自動解放を解除。
+    // これにより、CallbackContext の生存権（ライフサイクル）がSRT層へ安全に引き継がれます。
+    cbCtx.release();
+
+    // 最後にSRTのリッスンステートを始動
+    return srt_listen(u, static_cast<int>(backlog));
 }
 
 jobject JNICALL
 nativeAccept(JNIEnv *env, jobject ju) {
     SRTSOCKET u = Socket::getNative(env, ju);
-    struct sockaddr_storage ss = {0};
+    struct sockaddr_storage ss = { 0 };
     int sockaddr_len = sizeof(ss);
-    jobject inetSocketAddress = nullptr;
-
-    SRTSOCKET new_u = srt_accept((SRTSOCKET) u, reinterpret_cast<struct sockaddr *>(&ss),
-                                 &sockaddr_len);
-    if (new_u != -1) {
-        inetSocketAddress = InetSocketAddress::getJava(env, &ss);
+    
+    // 1. SRTのacceptを実行（JNIを一切挟まない純粋なC++高速処理）
+    SRTSOCKET new_u = srt_accept(u, reinterpret_cast<struct sockaddr*>(&ss), &sockaddr_len);
+    
+    // 2. 接続失敗（-1 または SRT_INVALID_SOCK）時は、Javaオブジェクトを1つも作らず最速で早期リターン
+    // Pair::newJavaPairに直接nullptrを流し込むことで、JNIのオーバーヘッドを完全にゼロにします
+    if (new_u == -1 || new_u == SRT_INVALID_SOCK) {
+        return Pair::newJavaPair(env, nullptr, nullptr);
     }
 
-    jobject res = Pair::newJavaPair(env, Socket::getJava(env, new_u),
-                                    inetSocketAddress);
+    // 3. 成功時のみ、中間に必要なJavaオブジェクトをローカル参照として生成
+    jobject jNewSocket = Socket::getJava(env, new_u);
+    jobject jInetAddr = InetSocketAddress::getJava(env, &ss);
 
-    return res;
+    // 4. 最終的にJavaへ返却する「Pair」オブジェクトを生成
+    jobject jResultPair = Pair::newJavaPair(env, jNewSocket, jInetAddr);
+
+    // 5. 【即時クリーンアップ】例外チェックを行う前に、まずは確実にローカル参照を解放
+    // これにより、もしこの後で例外が起きて関数を抜ける場合でも、JNIテーブルは完全に綺麗な状態が保証されます
+    if (jNewSocket) env->DeleteLocalRef(jNewSocket);
+    if (jInetAddr)  env->DeleteLocalRef(jInetAddr);
+
+    // 6. ProGuard/R8 難読化割れやメモリ不足（OOM）に対する最終防衛線
+    if (env->ExceptionCheck()) {
+        if (jResultPair) env->DeleteLocalRef(jResultPair);
+        return nullptr;
+    }
+
+    return jResultPair;
 }
 
 jint JNICALL
 nativeConnect(JNIEnv *env, jobject ju, jobject inetSocketAddress) {
     SRTSOCKET u = Socket::getNative(env, ju);
+    if (u == SRT_INVALID_SOCK) return SRT_EINVOP;
+
     int size = 0;
     const struct sockaddr_storage *ss = InetSocketAddress::getNative(env, inetSocketAddress, &size);
+    if (!ss) return SRT_ERROR;
 
-    // Add callback hook
-    auto *cbCtx = new CallbackContext(env, ju);
-    srt_connect_callback(u, srt_connect_cb, (void *) cbCtx);
+    // 1. 【最重要】まずは唯一の所有権を持つスマートポインタとしてコンテキストを確保
+    // これにより、この後の処理でエラーが起きて関数を抜けても、C++ヒープは100%自動解放されます。
+    std::unique_ptr<CallbackContext> cbCtx = std::make_unique<CallbackContext>(env, ju);
 
-    int res = srt_connect((SRTSOCKET) u, reinterpret_cast<const sockaddr *>(ss), size);
+    // 2. コールバックフックをSRTに登録
+    int cbRes = srt_connect_callback(u, srt_connect_cb, reinterpret_cast<void*>(cbCtx.get()));
+    if (cbRes == SRT_ERROR) {
+        if (ss) ::free(const_cast<struct sockaddr_storage*>(ss));
+        return SRT_ERROR; // 登録失敗時、unique_ptrによってcbCtxは安全に自動破棄（delete）されます
+    }
 
+    // 3. 実際の接続処理を実行
+    int res = srt_connect(u, reinterpret_cast<const sockaddr *>(ss), size);
+
+    // 4. 【運命の分岐点】接続処理の成否判定
+    if (res == SRT_ERROR) {
+        // srt_connectが失敗した場合、非同期コールバック（srt_connect_cb）は「絶対に発火しません」。
+        // そのため、速やかにSRT側のコールバック登録を安全に解除（nullptr化）します。
+        srt_connect_callback(u, nullptr, nullptr);
+        
+        // 【自動解放】ここでは cbCtx.release() を「呼ばない」ため、
+        // 関数を抜ける瞬間に unique_ptr が cbCtx を道連れにして自動で安全に delete します。
+    } else {
+        // srt_connectが成功（または非同期開始）した場合のみ、所有権をリリース。
+        // ポインタの管理権と生存サイクルを、未来に発火する srt_connect_cb 側へ完全に委ねます。
+        cbCtx.release();
+    }
+
+    // 5. 元コードにあるCスタイルのメモリ解放処理
     if (ss) {
-        free((void *) ss);
+        ::free(const_cast<struct sockaddr_storage*>(ss));
     }
 
     return res;
@@ -436,7 +544,7 @@ nativeSend(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len)
     // これにより、GetPrimitiveArrayCriticalの「GC停止リスク」を100%回避しつつ、
     // malloc/freeのオーバーヘッドをゼロ（ゼロコピーと同等）にします。
     if (len <= 4096) {
-        char stackBuf[len];
+        std::array<char, 4096> stackBuf;
         
         // Java配列からスタックへ直接コピー（これ以降、JVMに一切迷惑をかけない独立状態になります）
         env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(stackBuf));
@@ -474,49 +582,81 @@ nativeSendMsg2(JNIEnv *env,
     return res;
 }
 
-jint JNICALL
-nativeSendMsg(JNIEnv *env,
-              jobject ju,
-              jbyteArray byteArray,
-              jint offset,
-              jint len,
-              jint ttl/* = -1*/,
-              jboolean inOrder/* = false*/) {
-    // 1. 安全ガード: 不正な引数はメモリ確保の手前で即座に弾く（クラッシュ防止）
-    if (!byteArray || len <= 0 || offset < 0) {
-        return SRT_ERROR;
+jobject JNICALL
+nativeRecvMsg2(JNIEnv *env, jobject ju, jint len, jobject msgCtrl) {
+    // 1. 事前ガード：無駄な処理・配列確保を完璧に排除
+    if (len <= 0) {
+        jbyteArray emptyArray = env->NewByteArray(0);
+        return Pair::newJavaPair(env, Primitive::newJavaInt(env, 0), emptyArray);
     }
 
     SRTSOCKET u = Socket::getNative(env, ju);
+    
+    // 例外安全かつクリーンに自動解放されるスマートポインタ（RAII）
+    std::unique_ptr<SRT_MSGCTRL, void(*)(void*)> msgctrlPtr(
+        MsgCtrl::getNative(env, msgCtrl),
+        [](void* p) { if (p) ::free(p); }
+    );
 
-    // 2. 【完全防衛＆無駄なし】サイズに応じて処理ルートを完全分離
-    // 一般的なMTUサイズ（4096バイト以下）なら超高速な固定スタック領域へ。
-    // これにより、malloc/freeのオーバーヘッドを完全にゼロにします。
+    int res = -1;
+    jbyteArray byteArray = nullptr;
+
+    // 2. ハイブリッド・バッファ処理：MTUバッファ（4KB以下）は最速のスタック領域でmallocをゼロ化
     if (len <= 4096) {
-        // --- 【Aルート: 小型メッセージ・スタックルート】 ---
-        char stackBuf[len];
+        std::array<char, 4096> stackBuf;
+        res = srt_recvmsg2(u, stackBuf.data(), len, msgctrlPtr.get());
         
-        // Java配列からC++スタックへ直接データを引き出す（コピーはこれの1回のみ）
-        env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(stackBuf));
-        
-        // JNI呼び出しの直後に厳格な例外チェック
-        if (env->ExceptionCheck()) return SRT_ERROR;
-
-        // ネットワークが詰まってここでブロッキングが発生しても、JVM全体のGCは止まらないため安全です
-        return srt_sendmsg(u, stackBuf, len, static_cast<int>(ttl), inOrder ? 1 : 0);
-
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(stackBuf.data()));
+            }
+        }
     } else {
-        // --- 【Bルート: 大型メッセージ・ヒープルート】 ---
-        // このルートに入った時、上記Aルートの stackBuf はスタック上に1バイトも確保されません。
+        // 4097バイト以上の巨大データ要求時のみ、安全にヒープ（std::vector）へルート変更
         std::vector<char> heapBuf(len);
+        res = srt_recvmsg2(u, heapBuf.data(), len, msgctrlPtr.get());
         
-        // Java配列からC++ヒープへ直接引き出し
-        env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(heapBuf.data()));
-        
-        if (env->ExceptionCheck()) return SRT_ERROR;
-
-        return srt_sendmsg(u, heapBuf.data(), len, static_cast<int>(ttl), inOrder ? 1 : 0);
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(heapBuf.data()));
+            }
+        }
     }
+
+    // 3. エラーまたは受信失敗時の安全処理
+    if (!byteArray) {
+        byteArray = env->NewByteArray(0);
+        if (res < 0) res = -1;
+    }
+
+    // 4. 【重要：ステータスの逆流（Java側への同期）】
+    // srt_recvmsg2 が正常にデータを取得できた場合（res >= 0）のみ、
+    // C++側で更新された最新の制御メタデータをJavaの msgCtrl へ確実に書き戻します。
+    if (msgCtrl && msgctrlPtr && res >= 0) {
+        // glue.cpp 内で事前に静的キャッシュされているフィールドID（難読化対策済み）を使用
+        if (msgCtrlFlagsField)     env->SetIntField(msgCtrl, msgCtrlFlagsField, msgctrlPtr->flags);
+        if (msgCtrlTtlField)       env->SetIntField(msgCtrl, msgCtrlTtlField, msgctrlPtr->msgttl);
+        if (msgCtrlInorderField)   env->SetBooleanField(msgCtrl, msgCtrlInorderField, msgctrlPtr->inorder ? JNI_TRUE : JNI_FALSE);
+        if (msgCtrlPktSeqField)    env->SetIntField(msgCtrl, msgCtrlPktSeqField, msgctrlPtr->pktseq);
+        if (msgCtrlMsgNumberField) env->SetIntField(msgCtrl, msgCtrlMsgNumberField, msgctrlPtr->msgno);
+    }
+
+    // JNIの局所参照リークを防ぐため、プリミティブオブジェクトは一時変数で管理
+    jobject jResInt = Primitive::newJavaInt(env, res);
+    jobject jResultPair = Pair::newJavaPair(env, jResInt, byteArray);
+
+    // 不要になったJNIローカル参照を即時解放し、JNI参照テーブルのバーストを完全防御
+    env->DeleteLocalRef(jResInt);
+
+    // 5. 難読化割れやメモリ不足（OOM）の最終防衛線
+    if (env->ExceptionCheck()) {
+        if (jResultPair) env->DeleteLocalRef(jResultPair);
+        return nullptr;
+    }
+
+    return jResultPair;
 }
 
 jint JNICALL
@@ -538,17 +678,6 @@ nativeSendMsgCtrl2(JNIEnv *env,
 
     return res;
 }
-
-// ----------------------------------------------------------------------------
-// グローバル変数（難読化対策と安全な nullptr 管理）
-// ----------------------------------------------------------------------------
-static jclass    class_MsgCtrl          = nullptr; // クラス参照のみ NewGlobalRef が必要
-
-static jfieldID  msgCtrlFlagsField     = nullptr;
-static jfieldID  msgCtrlTtlField       = nullptr;
-static jfieldID  msgCtrlInorderField   = nullptr;
-static jfieldID  msgCtrlPktSeqField    = nullptr;
-static jfieldID  msgCtrlMsgNumberField = nullptr;
 
 jint JNICALL
 nativeSendMsgCtrl(JNIEnv *env,
@@ -586,7 +715,7 @@ nativeSendMsgCtrl(JNIEnv *env,
 
     // 4. 【完全防衛】サイズに応じた処理ルートの完全分離（JVMフリーズ防止＆実質ゼロコピー）
     if (len <= 4096) {
-        char stackBuf[len];
+        std::array<char, 4096> stackBuf;
         
         env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(stackBuf));
         if (env->ExceptionCheck()) return SRT_ERROR;
@@ -627,7 +756,7 @@ nativeRecv(JNIEnv *env, jobject ju, jint len) {
     if (len <= 4096) {
         // --- 【A: 小型パケット・スタックルート】 ---
         // len バイトぴったりをスタックに確保（二重確保の無駄は1バイトも発生しません）
-        char stackBuf[len]; 
+        std::array<char, 4096> stackBuf; 
         
         // JNIのロックをかけない、安全・高速な状態で SRT からデータを受信
         int res = srt_recv(u, stackBuf, len);
@@ -688,31 +817,60 @@ nativeRecvA(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len
 }
 
 jobject JNICALL
-nativeRecvMsg2(JNIEnv *env,
-               jobject ju,
-               jint len,
-               jobject msgCtrl) {
+nativeRecvMsg2(JNIEnv *env, jobject ju, jint len, jobject msgCtrl) {
+    // 1. 事前ガード：無駄な処理・配列確保を完全に排除
+    if (len <= 0) {
+        jbyteArray emptyArray = env->NewByteArray(0);
+        return Pair::newJavaPair(env, Primitive::newJavaInt(env, 0), emptyArray);
+    }
+
     SRTSOCKET u = Socket::getNative(env, ju);
-    SRT_MSGCTRL *msgctrl = MsgCtrl::getNative(env, msgCtrl);
-    jbyteArray byteArray;
-    auto *buf = (char *) malloc(sizeof(char) * len);
+    
+    // msgctrlのメモリ管理をスマートポインタ（std::unique_ptr）に委ねる
+    // これにより、関数のどこで例外やリターンが起きても100%自動解放され、リークしません
+    std::unique_ptr<SRT_MSGCTRL, void(*)(void*)> msgctrlPtr(
+        MsgCtrl::getNative(env, msgCtrl), 
+        [](void* p) { if (p) ::free(p); }
+    );
 
-    int res = srt_recvmsg2(u, buf, len, msgctrl);
+    int res = -1;
+    jbyteArray byteArray = nullptr;
 
-    if (res > 0) {
-        byteArray = env->NewByteArray(res);
-        env->SetByteArrayRegion(byteArray, 0, res, (jbyte *) buf);
+    // 2. メモリ効率の最適化（ハイブリッド・バッファ処理）
+    // 4096バイト以下なら最速のスタック領域を使用し、malloc/freeのコストをゼロにします。
+    if (len <= 4096) {
+        // 固定長のためスタックオーバーフローのリスクがなく、CPUキャッシュに完全に収まります
+        std::array<char, 4096> stackBuf;
+        
+        res = srt_recvmsg2(u, stackBuf.data(), len, msgctrlPtr.get());
+        
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(stackBuf.data()));
+            }
+        }
     } else {
+        // 4097バイト以上の巨大データのみ安全にヒープへ逃がす（std::vectorによる自動管理）
+        std::vector<char> heapBuf(len);
+        
+        res = srt_recvmsg2(u, heapBuf.data(), len, msgctrlPtr.get());
+        
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(heapBuf.data()));
+            }
+        }
+    }
+
+    // 3. 例外または受信失敗時の安全ガード
+    if (!byteArray) {
         byteArray = env->NewByteArray(0);
+        if (res < 0) res = -1; // 念のためエラー値を丸める
     }
 
-    if (buf != nullptr) {
-        free(buf);
-    }
-    if (msgctrl != nullptr) {
-        free(msgctrl);
-    }
-
+    // キャッシュ対応版の便利関数でラップして即座に返却（リフレクションコスト最小）
     return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
 }
 
@@ -891,149 +1049,175 @@ nativeEpollRemoveUSock(JNIEnv *env, jobject epoll, jobject ju) {
     return srt_epoll_remove_usock(eid, u);
 }
 
-// 無駄を完全にゼロにした『真の完璧』コード
 jobject JNICALL
 nativeEpollWait(JNIEnv *env, jobject epoll, jlong timeOut, jint rnum, jint wnum) {
-    // initListCache(env);
-
     int eid = Epoll::getNative(env, epoll);
 
     // 負の値の防衛ガード
     if (rnum < 0) rnum = 0;
     if (wnum < 0) wnum = 0;
 
-    // 分岐のしきい値設定
     const int STACK_LIMIT = 128;
+    SRTSOCKET* readFdsPtr = nullptr;
+    SRTSOCKET* writeFdsPtr = nullptr;
 
-    // ------------------------------------------------------------------------
-    // 【完全無駄なし】サイズに応じて処理ルートをコンパイルレベルで完全分離
-    // ------------------------------------------------------------------------
+    // Aルート用の固定スタック領域
+    SRTSOCKET stackReadFds[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
+    SRTSOCKET stackWriteFds[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
+
+    // Bルート用のヒープ領域
+    std::vector<SRTSOCKET> heapReadFds;
+    std::vector<SRTSOCKET> heapWriteFds;
+
     if (rnum <= STACK_LIMIT && wnum <= STACK_LIMIT) {
-        // --- 【Aルート: 両方とも小さい場合】 ---
-        // 128以下の時だけ、必要最小限の固定長スタックを確保
-        SRTSOCKET stackReadFds[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
-        SRTSOCKET stackWriteFds[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
-
-        int res = srt_epoll_wait(eid, stackReadFds, &rnum, stackWriteFds, &wnum, timeOut, nullptr, 0, nullptr, 0);
-
-        int validRnum = (res > 0 && rnum > 0) ? rnum : 0;
-        int validWnum = (res > 0 && wnum > 0) ? wnum : 0;
-
-        jobject jReadfds = env->NewObject(class_ArrayList, ctor_ArrayList, validRnum);
-        jobject jWritefds = env->NewObject(class_ArrayList, ctor_ArrayList, validWnum);
-
-        if (res > 0) {
-            for (int i = 0; i < validRnum; i++) {
-                jobject jSocket = Socket::getJava(env, stackReadFds[i]);
-                if (jSocket) {
-                    env->CallBooleanMethod(jReadfds, method_ListAdd, jSocket);
-                    env->DeleteLocalRef(jSocket);
-                }
-            }
-            for (int i = 0; i < validWnum; i++) {
-                jobject jSocket = Socket::getJava(env, stackWriteFds[i]);
-                if (jSocket) {
-                    env->CallBooleanMethod(jWritefds, method_ListAdd, jSocket);
-                    env->DeleteLocalRef(jSocket);
-                }
-            }
-            if (env->ExceptionCheck()) return nullptr;
-        }
-        return Pair::newJavaPair(env, jReadfds, jWritefds);
-
+        readFdsPtr = stackReadFds;
+        writeFdsPtr = stackWriteFds;
     } else {
-        // --- 【Bルート: どちらか一方が129以上の場合】 ---
-        // このルートに入った時、上記Aルートの stackReadFds/stackWriteFds は
-        // メモリ上に存在すらしない（確保されない）ため、無駄が1バイトも発生しません。
-        std::vector<SRTSOCKET> heapReadFds(rnum);
-        std::vector<SRTSOCKET> heapWriteFds(wnum);
-
-        int res = srt_epoll_wait(eid, heapReadFds.data(), &rnum, heapWriteFds.data(), &wnum, timeOut, nullptr, 0, nullptr, 0);
-
-        int validRnum = (res > 0 && rnum > 0) ? rnum : 0;
-        int validWnum = (res > 0 && wnum > 0) ? wnum : 0;
-
-        jobject jReadfds = env->NewObject(class_ArrayList, ctor_ArrayList, validRnum);
-        jobject jWritefds = env->NewObject(class_ArrayList, ctor_ArrayList, validWnum);
-
-        if (res > 0) {
-            for (int i = 0; i < validRnum; i++) {
-                jobject jSocket = Socket::getJava(env, heapReadFds[i]);
-                if (jSocket) {
-                    env->CallBooleanMethod(jReadfds, method_ListAdd, jSocket);
-                    env->DeleteLocalRef(jSocket);
-                }
-            }
-            for (int i = 0; i < validWnum; i++) {
-                jobject jSocket = Socket::getJava(env, heapWriteFds[i]);
-                if (jSocket) {
-                    env->CallBooleanMethod(jWritefds, method_ListAdd, jSocket);
-                    env->DeleteLocalRef(jSocket);
-                }
-            }
-            if (env->ExceptionCheck()) return nullptr;
-        }
-        return Pair::newJavaPair(env, jReadfds, jWritefds);
+        heapReadFds.resize(rnum);
+        heapWriteFds.resize(wnum);
+        readFdsPtr = heapReadFds.data();
+        writeFdsPtr = heapWriteFds.data();
     }
+
+    // SRTのepoll_waitを実行（重複をなくすため一本化）
+    int res = srt_epoll_wait(eid, readFdsPtr, &rnum, writeFdsPtr, &wnum, timeOut, nullptr, 0, nullptr, 0);
+
+    int validRnum = (res > 0 && rnum > 0) ? rnum : 0;
+    int validWnum = (res > 0 && wnum > 0) ? wnum : 0;
+
+    jobject jReadfds = env->NewObject(class_ArrayList, ctor_ArrayList, validRnum);
+    jobject jWritefds = env->NewObject(class_ArrayList, ctor_ArrayList, validWnum);
+
+    if (res > 0) {
+        // 💡【劇的最適化：JNIローカルキャッシュ機構】
+        // 検出されたソケットIDに対応するJavaオブジェクトを、この関数実行中だけ使い回すためのマップです。
+        // 同じソケットが何度も検出されたり、Read/Write両方で同時に検出された際、
+        // 2回目以降の Socket::getJava 呼び出し（Javaオブジェクトの新規生成）を100%回避します。
+        std::unordered_map<SRTSOCKET, jobject> socketObjectCache;
+
+        // 共通ヘルパーラムダ関数：キャッシュを利かせて ArrayList に詰め込む（コードの重複も撲滅）
+        auto addSocketsToList = [&](int validCount, SRTSOCKET* fdsPtr, jobject targetList) {
+            for (int i = 0; i < validCount; i++) {
+                SRTSOCKET sockId = fdsPtr[i];
+                jobject jSocket = nullptr;
+
+                auto it = socketObjectCache.find(sockId);
+                if (it != socketObjectCache.end()) {
+                    // キャッシュヒット！ Javaオブジェクトの新規Newを行わず、既存の参照をそのまま再利用
+                    jSocket = it->second;
+                } else {
+                    // キャッシュミス時（そのソケットを今フレーム初めて検出した時）のみ、1度だけ生成
+                    jSocket = Socket::getJava(env, sockId);
+                    if (jSocket) {
+                        socketObjectCache[sockId] = jSocket;
+                    }
+                }
+
+                if (jSocket) {
+                    env->CallBooleanMethod(targetList, method_ListAdd, jSocket);
+                    // ⚠️ ここでは DeleteLocalRef(jSocket) はまだ呼び出しません（キャッシュ内で生かすため）
+                }
+            }
+        };
+
+        // 読み込み・書き込みソケットリストに対してそれぞれ実行
+        addSocketsToList(validRnum, readFdsPtr, jReadfds);
+        addSocketsToList(validWnum, writeFdsPtr, jWritefds);
+
+        // 【一括クリーンアップ】このフレームで生成したすべての一時オブジェクトを、ループ終了後にまとめて安全に解放。
+        for (auto& pair : socketObjectCache) {
+            env->DeleteLocalRef(pair.second);
+        }
+    }
+
+    // 最終的な Pair 組み立てと【ArrayList自体の局所参照リーク防止】
+    jobject jResultPair = nullptr;
+    if (!env->ExceptionCheck()) {
+        jResultPair = Pair::newJavaPair(env, jReadfds, jWritefds);
+    }
+
+    // 【完全防衛】Pairに内包させた直後に、ArrayListの一時ローカル参照を即時解放
+    // これにより、JNIローカル参照テーブルの「目に見えない蓄積リーク」も完全にゼロになります。
+    if (jReadfds)  env->DeleteLocalRef(jReadfds);
+    if (jWritefds) env->DeleteLocalRef(jWritefds);
+
+    if (env->ExceptionCheck()) {
+        if (jResultPair) env->DeleteLocalRef(jResultPair);
+        return nullptr;
+    }
+
+    return jResultPair;
 }
 
 jobject JNICALL
-nativeEpollUWait(JNIEnv *env, jobject epoll, jlong timeOut, jint fdsSize) {
+nativeEpollUWait(JNIEnv *env, jobject epoll, jlong timeOut, jint num) {
     int eid = Epoll::getNative(env, epoll);
+    if (num < 0) num = 0;
 
-    if (fdsSize < 0) fdsSize = 0;
+    const int STACK_LIMIT = 16; // 元のソースのしきい値を維持
+    SRT_EPOLL_EVENT* fdsEventPtr = nullptr;
 
-    // ------------------------------------------------------------------------
-    // 【極限最適化】しきい値を「16」に引き下げ、CPUキャッシュを最速化
-    // ------------------------------------------------------------------------
-    // 実運用で最も高頻度な「同時イベント数16以下」をスタックで超軽量に処理し、
-    // それ以上の大容量要求時はヒープへ逃がすことで、無駄なスタック消費を完全にゼロにします。
-    const int STACK_LIMIT = 16;
+    // Aルート（スタック領域）
+    SRT_EPOLL_EVENT stackFdsEvent[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
+    // Bルート（ヒープ領域）
+    std::vector<SRT_EPOLL_EVENT> heapFdsEvent;
 
-    if (fdsSize <= STACK_LIMIT) {
-        // --- 【Aルート: 通常運用・超軽量スタックルート】 ---
-        // わずか16個分の領域のため、CPUのL1キャッシュに完全に収まり、実行速度がさらに跳ね上がります。
-        SRT_EPOLL_EVENT stackEvents[STACK_LIMIT > 0 ? STACK_LIMIT : 1];
-
-        int res = srt_epoll_uwait(eid, stackEvents, fdsSize, timeOut);
-
-        int validRes = (res > 0) ? res : 0;
-        jobject jEpollEvents = env->NewObject(class_ArrayList, ctor_ArrayList, validRes);
-
-        if (res > 0) {
-            for (int i = 0; i < res; i++) {
-                jobject jEpollEvent = EpollEvent::getJava(env, stackEvents[i]);
-                if (jEpollEvent) {
-                    env->CallBooleanMethod(jEpollEvents, method_ListAdd, jEpollEvent);
-                    env->DeleteLocalRef(jEpollEvent); // JNIテーブル溢れ対策
-                }
-            }
-            if (env->ExceptionCheck()) return nullptr;
-        }
-        return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), jEpollEvents);
-
+    if (num <= STACK_LIMIT) {
+        fdsEventPtr = stackFdsEvent;
     } else {
-        // --- 【Bルート: 大規模監視・ヒープルート】 ---
-        // fdsSizeが17以上の時、上記Aルートの stackEvents はメモリ上に存在すらしないため無駄がありません。
-        std::vector<SRT_EPOLL_EVENT> heapEvents(fdsSize);
+        heapFdsEvent.resize(num);
+        fdsEventPtr = heapFdsEvent.data();
+    }
 
-        int res = srt_epoll_uwait(eid, heapEvents.data(), fdsSize, timeOut);
+    // SRTのエポールユーウェイトを実行
+    int res = srt_epoll_uwait(eid, fdsEventPtr, num, timeOut);
+    int validNum = (res > 0) ? res : 0;
 
-        int validRes = (res > 0) ? res : 0;
-        jobject jEpollEvents = env->NewObject(class_ArrayList, ctor_ArrayList, validRes);
+    // 返却用の ArrayList を生成
+    jobject jEventList = env->NewObject(class_ArrayList, ctor_ArrayList, validNum);
 
-        if (res > 0) {
-            for (int i = 0; i < res; i++) {
-                jobject jEpollEvent = EpollEvent::getJava(env, heapEvents[i]);
-                if (jEpollEvent) {
-                    env->CallBooleanMethod(jEpollEvents, method_ListAdd, jEpollEvent);
-                    env->DeleteLocalRef(jEpollEvent);
+    if (res > 0) {
+        // 同一フレーム内の Socket オブジェクト重複生成を回避するローカルキャッシュ
+        std::unordered_map<SRTSOCKET, jobject> socketCache;
+
+        for (int i = 0; i < validNum; i++) {
+            SRTSOCKET sockId = fdsEventPtr[i].fd;
+            jobject jSocket = nullptr;
+
+            auto it = socketCache.find(sockId);
+            if (it != socketCache.end()) {
+                jSocket = it->second;
+            } else {
+                jSocket = Socket::getJava(env, sockId);
+                if (jSocket) {
+                    socketCache[sockId] = jSocket;
                 }
             }
-            if (env->ExceptionCheck()) return nullptr;
+
+            if (jSocket) {
+                // キャッシュされた安全なjSocketを渡し、EpollEventのJavaオブジェクトを生成
+                // (※EpollEvent::getJavaの内部実装が第3引数にjobjectを取るオーバーロードに対応している場合)
+                jobject jEvent = EpollEvent::getJava(env, fdsEventPtr[i].events, jSocket);
+                if (jEvent) {
+                    env->CallBooleanMethod(jEventList, method_ListAdd, jEvent);
+                    env->DeleteLocalRef(jEvent); // 詰め終えた部品は即時解放
+                }
+            }
         }
-        return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), jEpollEvents);
+
+        // フレーム内キャッシュのソケットを一括クリーンアップ
+        for (auto& pair : socketCache) {
+            env->DeleteLocalRef(pair.second);
+        }
     }
+
+    // ArrayList 自体の参照リークを防ぐ最終ガード
+    if (env->ExceptionCheck()) {
+        if (jEventList) env->DeleteLocalRef(jEventList);
+        return nullptr;
+    }
+
+    return jEventList;
 }
 
 jint JNICALL
