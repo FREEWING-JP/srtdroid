@@ -50,6 +50,17 @@ jclass    class_ArrayList = nullptr;
 jmethodID ctor_ArrayList  = nullptr;
 jmethodID method_ListAdd  = nullptr;
 
+// ----------------------------------------------------------------------------
+// グローバル変数（難読化対策と安全な nullptr 管理）
+// ----------------------------------------------------------------------------
+static jclass    class_MsgCtrl          = nullptr; // クラス参照のみ NewGlobalRef が必要
+
+static jfieldID  msgCtrlFlagsField     = nullptr;
+static jfieldID  msgCtrlTtlField       = nullptr;
+static jfieldID  msgCtrlInorderField   = nullptr;
+static jfieldID  msgCtrlPktSeqField    = nullptr;
+static jfieldID  msgCtrlMsgNumberField = nullptr;
+
 int onListenCallback(JNIEnv *env, jobject ju, jclass sockAddrClazz, SRTSOCKET ns, int hs_version,
                      const struct sockaddr *peeraddr, const char *streamid) {
     jclass socketClazz = env->GetObjectClass(ju);
@@ -667,17 +678,6 @@ nativeSendMsgCtrl2(JNIEnv *env,
 
     return res;
 }
-
-// ----------------------------------------------------------------------------
-// グローバル変数（難読化対策と安全な nullptr 管理）
-// ----------------------------------------------------------------------------
-static jclass    class_MsgCtrl          = nullptr; // クラス参照のみ NewGlobalRef が必要
-
-static jfieldID  msgCtrlFlagsField     = nullptr;
-static jfieldID  msgCtrlTtlField       = nullptr;
-static jfieldID  msgCtrlInorderField   = nullptr;
-static jfieldID  msgCtrlPktSeqField    = nullptr;
-static jfieldID  msgCtrlMsgNumberField = nullptr;
 
 jint JNICALL
 nativeSendMsgCtrl(JNIEnv *env,
