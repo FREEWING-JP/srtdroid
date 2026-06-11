@@ -385,7 +385,7 @@ nativeAccept(JNIEnv *env, jobject ju) {
 jint JNICALL
 nativeConnect(JNIEnv *env, jobject ju, jobject inetSocketAddress) {
     SRTSOCKET u = Socket::getNative(env, ju);
-    if (u == SRT_INVALID_SOCK) return SRT_ERRNO::SRT_EINVAL;
+    if (u == SRT_INVALID_SOCK) return SRT_EINVOP;
 
     int size = 0;
     const struct sockaddr_storage *ss = InetSocketAddress::getNative(env, inetSocketAddress, &size);
