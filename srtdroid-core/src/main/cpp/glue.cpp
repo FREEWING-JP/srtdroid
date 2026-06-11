@@ -688,31 +688,60 @@ nativeRecvA(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len
 }
 
 jobject JNICALL
-nativeRecvMsg2(JNIEnv *env,
-               jobject ju,
-               jint len,
-               jobject msgCtrl) {
+nativeRecvMsg2(JNIEnv *env, jobject ju, jint len, jobject msgCtrl) {
+    // 1. 事前ガード：無駄な処理・配列確保を完全に排除
+    if (len <= 0) {
+        jbyteArray emptyArray = env->NewByteArray(0);
+        return Pair::newJavaPair(env, Primitive::newJavaInt(env, 0), emptyArray);
+    }
+
     SRTSOCKET u = Socket::getNative(env, ju);
-    SRT_MSGCTRL *msgctrl = MsgCtrl::getNative(env, msgCtrl);
-    jbyteArray byteArray;
-    auto *buf = (char *) malloc(sizeof(char) * len);
+    
+    // msgctrlのメモリ管理をスマートポインタ（std::unique_ptr）に委ねる
+    // これにより、関数のどこで例外やリターンが起きても100%自動解放され、リークしません
+    std::unique_ptr<SRT_MSGCTRL, void(*)(void*)> msgctrlPtr(
+        MsgCtrl::getNative(env, msgCtrl), 
+        [](void* p) { if (p) ::free(p); }
+    );
 
-    int res = srt_recvmsg2(u, buf, len, msgctrl);
+    int res = -1;
+    jbyteArray byteArray = nullptr;
 
-    if (res > 0) {
-        byteArray = env->NewByteArray(res);
-        env->SetByteArrayRegion(byteArray, 0, res, (jbyte *) buf);
+    // 2. メモリ効率の最適化（ハイブリッド・バッファ処理）
+    // 4096バイト以下なら最速のスタック領域を使用し、malloc/freeのコストをゼロにします。
+    if (len <= 4096) {
+        // 固定長のためスタックオーバーフローのリスクがなく、CPUキャッシュに完全に収まります
+        std::array<char, 4096> stackBuf;
+        
+        res = srt_recvmsg2(u, stackBuf.data(), len, msgctrlPtr.get());
+        
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(stackBuf.data()));
+            }
+        }
     } else {
+        // 4097バイト以上の巨大データのみ安全にヒープへ逃がす（std::vectorによる自動管理）
+        std::vector<char> heapBuf(len);
+        
+        res = srt_recvmsg2(u, heapBuf.data(), len, msgctrlPtr.get());
+        
+        if (res > 0) {
+            byteArray = env->NewByteArray(res);
+            if (byteArray) {
+                env->SetByteArrayRegion(byteArray, 0, res, reinterpret_cast<const jbyte*>(heapBuf.data()));
+            }
+        }
+    }
+
+    // 3. 例外または受信失敗時の安全ガード
+    if (!byteArray) {
         byteArray = env->NewByteArray(0);
+        if (res < 0) res = -1; // 念のためエラー値を丸める
     }
 
-    if (buf != nullptr) {
-        free(buf);
-    }
-    if (msgctrl != nullptr) {
-        free(msgctrl);
-    }
-
+    // キャッシュ対応版の便利関数でラップして即座に返却（リフレクションコスト最小）
     return Pair::newJavaPair(env, Primitive::newJavaInt(env, res), byteArray);
 }
 
