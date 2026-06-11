@@ -366,17 +366,43 @@ nativeAccept(JNIEnv *env, jobject ju) {
 jint JNICALL
 nativeConnect(JNIEnv *env, jobject ju, jobject inetSocketAddress) {
     SRTSOCKET u = Socket::getNative(env, ju);
+    if (u == SRT_INVALID_SOCK) return SRT_ERRNO::SRT_EINVAL;
+
     int size = 0;
     const struct sockaddr_storage *ss = InetSocketAddress::getNative(env, inetSocketAddress, &size);
+    if (!ss) return SRT_ERROR;
 
-    // Add callback hook
-    auto *cbCtx = new CallbackContext(env, ju);
-    srt_connect_callback(u, srt_connect_cb, (void *) cbCtx);
+    // 1. 【最重要】まずは唯一の所有権を持つスマートポインタとしてコンテキストを確保
+    // これにより、この後の処理でエラーが起きて関数を抜けても、C++ヒープは100%自動解放されます。
+    std::unique_ptr<CallbackContext> cbCtx = std::make_unique<CallbackContext>(env, ju);
 
-    int res = srt_connect((SRTSOCKET) u, reinterpret_cast<const sockaddr *>(ss), size);
+    // 2. コールバックフックをSRTに登録
+    int cbRes = srt_connect_callback(u, srt_connect_cb, reinterpret_cast<void*>(cbCtx.get()));
+    if (cbRes == SRT_ERROR) {
+        if (ss) ::free(const_cast<struct sockaddr_storage*>(ss));
+        return SRT_ERROR; // 登録失敗時、unique_ptrによってcbCtxは安全に自動破棄（delete）されます
+    }
 
+    // 3. 実際の接続処理を実行
+    int res = srt_connect(u, reinterpret_cast<const sockaddr *>(ss), size);
+
+    // 4. 【運命の分岐点】接続処理の成否判定
+    if (res == SRT_ERROR) {
+        // srt_connectが失敗した場合、非同期コールバック（srt_connect_cb）は「絶対に発火しません」。
+        // そのため、速やかにSRT側のコールバック登録を安全に解除（nullptr化）します。
+        srt_connect_callback(u, nullptr, nullptr);
+        
+        // 【自動解放】ここでは cbCtx.release() を「呼ばない」ため、
+        // 関数を抜ける瞬間に unique_ptr が cbCtx を道連れにして自動で安全に delete します。
+    } else {
+        // srt_connectが成功（または非同期開始）した場合のみ、所有権をリリース。
+        // ポインタの管理権と生存サイクルを、未来に発火する srt_connect_cb 側へ完全に委ねます。
+        cbCtx.release();
+    }
+
+    // 5. 元コードにあるCスタイルのメモリ解放処理
     if (ss) {
-        free((void *) ss);
+        ::free(const_cast<struct sockaddr_storage*>(ss));
     }
 
     return res;
