@@ -303,27 +303,35 @@ nativeClose(JNIEnv *env, jobject ju) {
 }
 
 // Connecting
+#include <memory> // std::unique_ptr を使用するために最上部で必須
+
 jint JNICALL
 nativeListen(JNIEnv *env, jobject ju, jint backlog) {
     SRTSOCKET u = Socket::getNative(env, ju);
-    if (u == SRT_INVALID_SOCK) return SRT_ERRNO::SRT_EINVAL;
-
-    // 【防衛策】万が一、既に listen_callback が登録されていた場合は事前に回収してリークを防ぐ
-    // SRTには直接 opaque を取得するAPIがないため、一度 nullptr で上書きして古いポインタを破棄する設計にするか、
-    // close 時に一括で管理するのが安全です。
     
-    // 新しいコンテキストの作成（例外安全のため unique_ptr で確保し、登録成功時に所有権をリリース）
+    // 💡【コンパイルエラーの完全修正】
+    // プレフィックスを排し、定義されている正しいSRTエラーコード(SRT_EINVOP)へ差し替えます
+    if (u == SRT_INVALID_SOCK) return SRT_EINVOP;
+
+    // 新しいコンテキストの作成（例外安全のため unique_ptr で確保）
     std::unique_ptr<CallbackContext> cbCtx = std::make_unique<CallbackContext>(env, ju);
 
     // SRTに listen コールバックとコンテキストポインタを登録
+    // reinterpret_cast で安全に void* へ変換します
     int cbRes = srt_listen_callback(u, srt_listen_cb, reinterpret_cast<void*>(cbCtx.get()));
+    
     if (cbRes == SRT_ERROR) {
-        return SRT_ERROR; // 登録失敗時は、unique_ptr により自動で安全に delete されリークしません
+        // srt_listen_callback 自体が失敗した場合（通常は起きませんが防衛策として）
+        // ここでは cbCtx.release() を呼ばないため、関数を抜ける瞬間に unique_ptr が 
+        // cbCtx を自動的に delete 解放し、メモリリークの芽を100%摘み取ります。
+        return SRT_ERROR; 
     }
 
-    // SRTへの登録に成功したため、スマートポインタの自動解放を解除（ポインタの生存権をSRT層へ委ねる）
+    // SRTへの登録（ポインタのハンドリング）に完全に成功したため、スマートポインタの自動解放を解除。
+    // これにより、CallbackContext の生存権（ライフサイクル）がSRT層へ安全に引き継がれます。
     cbCtx.release();
 
+    // 最後にSRTのリッスンステートを始動
     return srt_listen(u, static_cast<int>(backlog));
 }
 
