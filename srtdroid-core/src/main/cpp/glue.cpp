@@ -41,7 +41,8 @@
 // 根拠①: ネットワークの限界（MTU 1500）からIP/UDP/SRTのヘッダーを引くと、数学的に 1456バイト しか残らないため。
 // 根拠②: SRT公式C++ライブラリの内部で #define SRT_MAX_PAYLOAD_SIZE 1456 と最大値が固定されているため。
 // (1456+16*5)/32 = 48
-#define SRT_MAX_BUFFER_SIZE (1456+16*5)
+// #define SRT_MAX_BUFFER_SIZE (1456+16*5)
+#define SRT_MAX_BUFFER_SIZE 2048
 
 // ----------------------------------------------------------------------------
 // 静的変数の実体定義（Pair と Primitive）
