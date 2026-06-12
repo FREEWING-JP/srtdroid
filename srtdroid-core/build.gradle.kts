@@ -47,7 +47,7 @@ android {
             )
 
             ndk {
-                debugSymbolLevel = 'NONE'
+                debugSymbolLevel = "NONE"
             }
         }
     }
