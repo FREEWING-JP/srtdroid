@@ -446,7 +446,7 @@ nativeSend(JNIEnv *env, jobject ju, jbyteArray byteArray, jint offset, jint len)
     // 2. [完全防衛] 一般的なパケットサイズ（MTU:SRT_MAX_BUFFER_SIZEバイト以下）なら最速の固定スタックへ完全分離
     // これにより、GetPrimitiveArrayCriticalの「GC停止リスク」を100%回避しつつ、
     // malloc/freeのオーバーヘッドをゼロ（ゼロコピーと同等）にします。
-        char stackBuf[len];
+        std::array<char, SRT_MAX_BUFFER_SIZE> _stackBuf; char* stackBuf = _stackBuf.data();
         
         // Java配列からスタックへ直接コピー（これ以降、JVMに一切迷惑をかけない独立状態になります）
         env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(stackBuf));
@@ -491,7 +491,7 @@ nativeSendMsg(JNIEnv *env,
     // 一般的なMTUサイズ（SRT_MAX_BUFFER_SIZEバイト以下）なら超高速な固定スタック領域へ。
     // これにより、malloc/freeのオーバーヘッドを完全にゼロにします。
         // --- 【Aルート: 小型メッセージ・スタックルート】 ---
-        char stackBuf[len];
+        std::array<char, SRT_MAX_BUFFER_SIZE> _stackBuf; char* stackBuf = _stackBuf.data();
         
         // Java配列からC++スタックへ直接データを引き出す（コピーはこれの1回のみ）
         env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(stackBuf));
@@ -572,7 +572,7 @@ nativeSendMsgCtrl(JNIEnv *env,
     }
 
     // 4. 【完全防衛】サイズに応じた処理ルートの完全分離（JVMフリーズ防止＆実質ゼロコピー）
-        char stackBuf[len];
+        std::array<char, SRT_MAX_BUFFER_SIZE> _stackBuf; char* stackBuf = _stackBuf.data();
         
         env->GetByteArrayRegion(byteArray, offset, len, reinterpret_cast<jbyte*>(stackBuf));
         if (env->ExceptionCheck()) return SRT_ERROR;
@@ -603,7 +603,7 @@ nativeRecv(JNIEnv *env, jobject ju, jint len) {
     
         // --- 【A: 小型パケット・スタックルート】 ---
         // len バイトぴったりをスタックに確保（二重確保の無駄は1バイトも発生しません）
-        char stackBuf[len]; 
+        std::array<char, SRT_MAX_BUFFER_SIZE> _stackBuf; char* stackBuf = _stackBuf.data(); 
         
         // JNIのロックをかけない、安全・高速な状態で SRT からデータを受信
         int res = srt_recv(u, stackBuf, len);
