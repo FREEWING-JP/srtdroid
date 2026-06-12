@@ -654,7 +654,7 @@ nativeRecvMsg2(JNIEnv *env, jobject ju, jint len, jobject msgCtrl) {
     SRT_MSGCTRL *msgctrl = MsgCtrl::getNative(env, msgCtrl);
 
     // 固定長スタックバッファ運用（受信バッファのmalloc/freeコストは完全ゼロ）
-    char stackBuf[SRT_MAX_BUFFER_SIZE];
+    std::array<char, SRT_MAX_BUFFER_SIZE> _stackBuf; char* stackBuf = _stackBuf.data();
     
     int res = srt_recvmsg2(u, stackBuf, len, msgctrl);
     
