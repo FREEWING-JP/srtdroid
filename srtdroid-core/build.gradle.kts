@@ -20,6 +20,9 @@ android {
 
     externalNativeBuild {
         cmake {
+            // 1. C++最適化フラグと、未使用コードを削るフラグを compiler に渡す
+            cppFlags("-O3 -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections")
+
             // 不要なコンパイルをスキップするフラグを注入
             // 既存の設定（例: -DANDROID_STL=c++_shared など）の後ろに追加
             arguments.addAll(listOf(
@@ -29,6 +32,7 @@ android {
                 "-DENABLE_CODE_COVERAGE=OFF", // 4. コードカバレッジ計測用の無駄なバイナリ埋め込みを排除
                 "-DENABLE_STDCXX_SYNC=ON",    // 5. Android環境に最適なC++11標準同期の有効化
                 "-DCMAKE_BUILD_TYPE=Release"  // 6. デバッグ情報の削除とコンパイラ最適化(-O3)の強制
+                "-DANDROID_STL=c++_static" // 今回の std::array 利用に伴い、staticリンクにして.soのサイズを削減
             ))
         }
     }
