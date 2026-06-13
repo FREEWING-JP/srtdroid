@@ -76,3 +76,26 @@ set_target_properties(srt PROPERTIES IMPORTED_LOCATION ${CMAKE_LIBRARY_OUTPUT_DI
 add_library(srtdroid SHARED glue.cpp CallbackContext.cpp)
 include_directories(${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/include)
 target_link_libraries(srtdroid log android srt crypto ssl z)
+
+# =============================================================================
+# 製品（Release）ビルド時のバイナリサイズ最適化（無駄なデバッグシンボルの完全削除）
+# =============================================================================
+if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "Release")
+    
+    # 1. コンパイルオプションからデバッグシンボル生成フラグ（-g）を完全に除外
+    string(REPLACE "-g" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+    string(REPLACE "-g" "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
+    
+    # 2. サイズ最適化フラグ（-Os または -O3）を強制適用し、デバッグシンボルを生成させない
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -fvisibility=hidden -fvisibility-inlines-hidden")
+    set(CMAKE_C_FLAGS_RELEASE   "-O3 -fvisibility=hidden")
+
+    # 3. リンク時にシンボルをストリップ（削ぎ落とし）してバイナリサイズを極小化
+    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -Wl,--strip-all")
+
+endif()
+
+# C++11を強制し、独自拡張（可変長配列など）を不許可にする
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)

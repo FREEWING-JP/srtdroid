@@ -17,6 +17,29 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
+
+    externalNativeBuild {
+        cmake {
+            // 1. C++最適化フラグと、未使用コードを削るフラグを compiler に渡す
+            cppFlags("-O3 -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections")
+
+            // 不要なコンパイルをスキップするフラグを注入
+            // 既存の設定（例: -DANDROID_STL=c++_shared など）の後ろに追加
+            arguments.addAll(listOf(
+                "-DENABLE_APPS=OFF",          // 1. srt-live-transmit などのPC用アプリをビルドしない（超重要）
+                "-DENABLE_TESTING=OFF",       // 2. テスト用プログラムのビルドをすべてスキップ
+                "-DENABLE_EXAMPLES=OFF",      // 3. SRT公式のC++サンプルプログラムをスキップ
+                "-DENABLE_CODE_COVERAGE=OFF", // 4. コードカバレッジ計測用の無駄なバイナリ埋め込みを排除
+                "-DENABLE_STDCXX_SYNC=ON",    // 5. Android環境に最適なC++11標準同期の有効化
+                "-DCMAKE_BUILD_TYPE=Release", // 6. デバッグ情報の削除とコンパイラ最適化(-O3)の強制
+                "-DANDROID_STL=c++_static" // 今回の std::array 利用に伴い、staticリンクにして.soのサイズを削減
+            ))
+        }
+    }
+
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -26,6 +49,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+
+            ndk {
+                debugSymbolLevel = "NONE"
+            }
         }
     }
 
@@ -40,15 +67,17 @@ android {
         targetCompatibility = JavaVersion.VERSION_1_8
     }
 
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
-
     publishing {
         singleVariant("release") {
             withJavadocJar()
             withSourcesJar()
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
     }
 }
 

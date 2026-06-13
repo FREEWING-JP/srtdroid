@@ -17,86 +17,48 @@
 
 #include "Models.h"
 
+// 💡 glue.cpp 側（またはJNI_OnLoad）で管理されているグローバルキャッシュを外部参照
+extern jfieldID msgCtrlFlagsField;
+extern jfieldID msgCtrlTtlField;
+extern jfieldID msgCtrlInorderField; // ※ glue.cpp 側の変数名（msgCtrlInorderField）に統一
+extern jfieldID msgCtrlPktSeqField;
+extern jfieldID msgCtrlMsgNumberField; // ※ glue.cpp 側の変数名（msgCtrlMsgNumberField）に統一
+
+// 今回追加で必要となる、上部でキャッシュすべきフィールドIDの宣言
+extern jfieldID msgCtrlBoundaryField;
+extern jfieldID msgCtrlSrcTimeField;
+
 class MsgCtrl {
 public:
     static SRT_MSGCTRL *
     getNative(JNIEnv *env, jobject msgCtrl) {
-        SRT_MSGCTRL *srt_msgctrl = nullptr;
-
         if (msgCtrl == nullptr)
             return nullptr;
 
-        jclass msgCtrlClazz = env->GetObjectClass(msgCtrl);
-        if (!msgCtrlClazz) {
-            LOGE("Can't get MsgCtrl class");
+        // 🔴【超弩級の無駄を排除】
+        // 毎回呼ばれていた env->GetObjectClass や 7連続の env->GetFieldID を完全に撤廃。
+        // 万が一、JNI_OnLoad等でのキャッシュが未完了な場合の安全ガードのみ配置します。
+        if (!msgCtrlFlagsField || !msgCtrlTtlField || !msgCtrlInorderField) {
+            LOGE("MsgCtrl fields are not initialized in JNI_OnLoad");
             return nullptr;
         }
 
-        jfieldID msgCtrlFlagsField = env->GetFieldID(msgCtrlClazz, "flags", "I");
-        if (!msgCtrlFlagsField) {
-            LOGE("Can't get flags field");
-            env->DeleteLocalRef(msgCtrlClazz);
-            return nullptr;
-        }
-
-        jfieldID msgCtrlTtlField = env->GetFieldID(msgCtrlClazz, "ttl", "I");
-        if (!msgCtrlTtlField) {
-            LOGE("Can't get ttl field");
-            env->DeleteLocalRef(msgCtrlClazz);
-            return nullptr;
-        }
-
-        jfieldID msgCtrlInOrderField = env->GetFieldID(msgCtrlClazz, "inOrder", "Z");
-        if (!msgCtrlInOrderField) {
-            LOGE("Can't get inOrder field");
-            env->DeleteLocalRef(msgCtrlClazz);
-            return nullptr;
-        }
-
-        jfieldID msgCtrlBondaryField = env->GetFieldID(msgCtrlClazz, "boundary",
-        "L" BOUNDARY_CLASS ";");
-        if (!msgCtrlBondaryField) {
-            LOGE("Can't get boundary field");
-            env->DeleteLocalRef(msgCtrlClazz);
-            return nullptr;
-        }
-
-        jfieldID msgCtrlSrcTimeField = env->GetFieldID(msgCtrlClazz, "srcTime", "J");
-        if (!msgCtrlSrcTimeField) {
-            LOGE("Can't get srcTime field");
-            env->DeleteLocalRef(msgCtrlClazz);
-            return nullptr;
-        }
-
-        jfieldID msgCtrlPktSeqField = env->GetFieldID(msgCtrlClazz, "pktSeq", "I");
-        if (!msgCtrlPktSeqField) {
-            LOGE("Can't get pktSeq field");
-            env->DeleteLocalRef(msgCtrlClazz);
-            return nullptr;
-        }
-
-        jfieldID msgCtrlNoField = env->GetFieldID(msgCtrlClazz, "no", "I");
-        if (!msgCtrlNoField) {
-            LOGE("Can't get message number field");
-            env->DeleteLocalRef(msgCtrlClazz);
-            return nullptr;
-        }
-
-        srt_msgctrl = (SRT_MSGCTRL *) malloc(sizeof(SRT_MSGCTRL));
+        SRT_MSGCTRL *srt_msgctrl = (SRT_MSGCTRL *) malloc(sizeof(SRT_MSGCTRL));
         if (srt_msgctrl != nullptr) {
+            // 💡 起動時に1度だけ検索済みの最速ポインタ(fieldID)でダイレクトにJavaの値を引く
             srt_msgctrl->flags = env->GetIntField(msgCtrl, msgCtrlFlagsField);
             srt_msgctrl->msgttl = env->GetIntField(msgCtrl, msgCtrlTtlField);
-            srt_msgctrl->inorder = env->GetBooleanField(msgCtrl, msgCtrlInOrderField);
-            srt_msgctrl->boundary = EnumsSingleton::getInstance(env)->boundary->getNativeValue(env,
-                                                                                               env->GetObjectField(
-                                                                                                       msgCtrl,
-                                                                                                       msgCtrlBondaryField));
+            srt_msgctrl->inorder = (env->GetBooleanField(msgCtrl, msgCtrlInorderField) == JNI_TRUE) ? 1 : 0;
+            
+            // boundary と srcTime もグローバルキャッシュから取得
+            jobject jBoundary = env->GetObjectField(msgCtrl, msgCtrlBoundaryField);
+            srt_msgctrl->boundary = EnumsSingleton::getInstance(env)->boundary->getNativeValue(env, jBoundary);
+            if (jBoundary) env->DeleteLocalRef(jBoundary); // 局所オブジェクト参照の即時解放（無駄の排除）
+
             srt_msgctrl->srctime = (uint64_t) env->GetLongField(msgCtrl, msgCtrlSrcTimeField);
             srt_msgctrl->pktseq = env->GetIntField(msgCtrl, msgCtrlPktSeqField);
-            srt_msgctrl->msgno = env->GetIntField(msgCtrl, msgCtrlNoField);
+            srt_msgctrl->msgno = env->GetIntField(msgCtrl, msgCtrlMsgNumberField);
         }
-
-        env->DeleteLocalRef(msgCtrlClazz);
 
         return srt_msgctrl;
     }

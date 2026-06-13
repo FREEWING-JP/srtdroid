@@ -19,7 +19,17 @@
 
 class Pair {
 public:
+    // キャッシュを保持する静的変数。JNI_OnLoadで初期化されます。
+    static jclass cachedPairClazz;
+    static jmethodID cachedPairConstructorMethod;
+
     static jobject newJavaPair(JNIEnv *env, jobject first, jobject second) {
+        // 1. キャッシュが存在する場合は、リフレクションを一切通らず最速ルートで生成
+        if (cachedPairClazz && cachedPairConstructorMethod) {
+            return env->NewObject(cachedPairClazz, cachedPairConstructorMethod, first, second);
+        }
+
+        // 2. フォールバック（共存用）：JNI_OnLoad未対応、または初期化前でも元の挙動で安全に動作
         jclass pairClazz = env->FindClass(PAIR_CLASS);
         if (!pairClazz) {
             LOGE("Can't get Pair class");
@@ -27,7 +37,7 @@ public:
         }
 
         jmethodID pairConstructorMethod = env->GetMethodID(pairClazz, "<init>",
-                                                           "(Ljava/lang/Object;Ljava/lang/Object;)V");
+                                                            "(Ljava/lang/Object;Ljava/lang/Object;)V");
         if (!pairConstructorMethod) {
             LOGE("Can't get Pair constructor");
             env->DeleteLocalRef(pairClazz);
@@ -35,9 +45,7 @@ public:
         }
 
         jobject pair = env->NewObject(pairClazz, pairConstructorMethod, first, second);
-
         env->DeleteLocalRef(pairClazz);
-
         return pair;
     }
 };
